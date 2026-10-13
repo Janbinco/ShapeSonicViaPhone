@@ -32,8 +32,20 @@ final class Visualizer {
     var material = PhysicallyBasedMaterial()
     material.baseColor = .init(tint: UIColor(red: 0.30, green: 0.45, blue: 0.95, alpha: 1))
     material.roughness = 0.7
-    material.blending = .transparent(opacity: 0.45)
-    if #available(iOS 18.0, *) { material.faceCulling = .none }  // visible from inside too
+    // Transparent triangles within one mesh are not sorted. If they wrote depth,
+    // whichever were drawn first would hide the rest, which looks like a
+    // patchwork of flipped triangles wherever the surface overlaps itself.
+    // Without depth writes every layer blends, and since all triangles share
+    // one colour the result does not depend on the order. The inward-facing
+    // copy shows the far side (and the surface around you when inside) lit
+    // correctly; both copies use ordinary back-face culling.
+    if #available(iOS 18.0, *) {
+      material.blending = .transparent(opacity: 0.3)
+      material.writesDepth = false
+      b.addInwardCopy()
+    } else {
+      material.blending = .transparent(opacity: 0.45)  // outer faces only
+    }
     shapeEntity.model = b.resource().map { ModelComponent(mesh: $0, materials: [material]) }
     setFeatures(shape)
   }
@@ -95,6 +107,17 @@ struct MeshBuilder {
         normals.append(simd_length(n) > 0 ? simd_normalize(n) : faceNormal[f])
       }
       indices += [base + UInt32(3 * f), base + UInt32(3 * f + 1), base + UInt32(3 * f + 2)]
+    }
+  }
+
+  /// Append every triangle again with reversed winding and normals.
+  mutating func addInwardCopy() {
+    let base = UInt32(positions.count)
+    let count = indices.count
+    positions += positions
+    normals += normals.map { -$0 }
+    for t in stride(from: 0, to: count, by: 3) {
+      indices += [base + indices[t], base + indices[t + 2], base + indices[t + 1]]
     }
   }
 

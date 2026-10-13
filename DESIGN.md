@@ -301,9 +301,17 @@ horizontal plane and rests the shape's base on it.
   edges and corners; Hands; the sharp-edge angle; volume; the latency options and
   the measured output latency; placement; screen ppi and its override.
 - **Visualization** (hidden by default): a translucent mesh, smooth-shaded
-  except across creases sharper than the edge threshold and drawn from both
-  sides (so it can be seen from inside), sharp edges as orange 1.5 mm tubes,
-  corners as red dots with translucent 2 cm range spheres.
+  except across creases sharper than the edge threshold, sharp edges as orange
+  1.5 mm tubes, corners as red dots with translucent 2 cm range spheres.
+  RealityKit does not sort the triangles within a transparent mesh, so if
+  they wrote depth, whichever were drawn first would hide the rest (a
+  patchwork of "flipped" triangles wherever the surface overlaps itself). On
+  iOS 18+ the shape is drawn without depth writes, as an outward-facing and an
+  inward-facing copy, each with back-face culling. Every layer then blends
+  with correct lighting, and because all its triangles share one colour the
+  result doesn't depend on draw order. The far side and the inside are visible,
+  and so are all edges and corners. iOS 17 draws only the outward faces, with
+  depth, so overlapping parts of concave shapes can still look patchy there.
 - **Finger rings** are always drawn under the fingers, in the hand's colour,
   labelled with the note. They don't reveal the shape: they are filled while
   inside only when the shape is shown.

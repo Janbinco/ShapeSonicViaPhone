@@ -243,10 +243,10 @@ plane z = 0. `world = cameraTransform · p`, `local = shapeToWorld⁻¹ · world
 The same two modes as the web demo, chosen under **Hands** in the menu and
 remembered:
 
-- **Screen halves** (default): a touch is the left hand if it starts on the left
+- **Screen halves**: a touch is the left hand if it starts on the left
   half of the screen, in the current orientation. It keeps its hand when dragged
   across the midline. A faint midline is drawn while no finger is down.
-- **Touch order**: the first five simultaneous touches are the left hand, and
+- **Touch order** (default): the first five simultaneous touches are the left hand, and
   the next five the right hand: a new touch takes the earliest free slot,
   checking the left hand first.
 - Each new touch takes the lowest free of its hand's 5 slots, which is its

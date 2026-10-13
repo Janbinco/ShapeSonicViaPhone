@@ -74,7 +74,7 @@ final class AppModel: ObservableObject {
     engine = Engine(pose: pose, audio: audio)
     stage = Stage(engine: engine)
     let d = UserDefaults.standard
-    handMode = HandMode(rawValue: d.string(forKey: "handMode") ?? "") ?? .split
+    handMode = HandMode(rawValue: d.string(forKey: "handMode") ?? "") ?? .order
     volume = d.object(forKey: "volume") as? Float ?? 0.8
     predictMotion = d.object(forKey: "predictMotion") as? Bool ?? true
     predictTouches = d.bool(forKey: "predictTouches")

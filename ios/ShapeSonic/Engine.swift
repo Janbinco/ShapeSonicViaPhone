@@ -37,7 +37,7 @@ final class Engine {
     didSet { worldToShape = shapeToWorld.inverse }
   }
   private(set) var worldToShape = matrix_identity_float4x4
-  var handMode: HandMode = .split {
+  var handMode: HandMode = .order {
     didSet { clearFingers() }
   }
   var usePredictedTouches = false

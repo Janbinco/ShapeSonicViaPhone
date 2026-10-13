@@ -1,12 +1,17 @@
 // Adaptive octree signed distance field.
 //
-// A cell is split while it is larger than the leaf size and its centre is
-// close to the surface: within kNear cell sides for cells of up to kNearSide
-// leaves (enough that every cell the surface crosses ends up at the finest
-// level, since the half-diagonal is 0.87 sides), and within kFar sides for
-// bigger cells, so that away from the surface cells grow in proportion to the
-// distance and the trilinear error stays a small fraction of the distance. Each leaf stores its 8 corner values,
-// quantized to int16. Corners shared by several leaves are evaluated once.
+// Refinement, level by level:
+// * A cell the surface may pass through (its centre is within kNear sides of
+//   the surface; the half-diagonal is 0.87 sides) is always split, down to the
+//   leaf size, so the zero level set is resolved at the finest level.
+// * Any other cell is split if it is large compared to its distance from the
+//   surface (side > distance / kFar), or if trilinear interpolation of its
+//   corners misses the exact distance at its centre by more than
+//   kTolAbs + kTolRel * |distance| (error-driven, as in adaptive distance
+//   fields). This concentrates cells near the medial axis and other kinks of
+//   the distance field, where interpolation is worst.
+// Each leaf stores its 8 corner values, quantized to int16. Corners shared by
+// several leaves are evaluated once.
 
 #include <algorithm>
 #include <limits>
@@ -15,8 +20,8 @@
 
 namespace ss {
 
-static constexpr float kNear = 0.9f, kFar = 2.0f;
-static constexpr uint32_t kNearSide = 2;
+static constexpr float kNear = 0.9f, kFar = 1.0f;
+static constexpr float kTolAbs = 0.0005f, kTolRel = 0.01f;
 static constexpr int kMaxDepth = 12;
 
 void OctreeSDF::build(Vec3 center, float half_extent, float leaf_size, int threads,
@@ -36,20 +41,47 @@ void OctreeSDF::build(Vec3 center, float half_extent, float leaf_size, int threa
   };
   nodes_.assign(1, 0);
   std::vector<Cell> level{{0, 0, 0, 0, lattice}}, next, leaves;
-  std::vector<float> dist;
+  std::vector<char> split;
   while (!level.empty()) {
-    dist.resize(level.size());
+    split.assign(level.size(), 0);
     parallel_for(level.size(), threads, [&](size_t b, size_t e) {
       for (size_t c = b; c < e; c++) {
         const Cell &cell = level[c];
-        float h = 0.5f * cell.side;
-        dist[c] = unsigned_dist(origin_ + Vec3(cell.i + h, cell.j + h, cell.k + h) * leaf_size);
+        if (cell.side <= 1) continue;
+        const float side = cell.side * leaf_size, h = 0.5f * cell.side;
+        const Vec3 lo = origin_ + Vec3(float(cell.i), float(cell.j), float(cell.k)) * leaf_size;
+        const float d = unsigned_dist(lo + Vec3(h, h, h) * leaf_size);
+        if (d < kNear * side || d < kFar * side) {
+          split[c] = 1;
+          continue;
+        }
+        // Compare trilinear interpolation with exact values at the centre (the
+        // mean of the 8 corners) and the 6 face centres (the mean of 4 corners).
+        float corner[8];
+        for (int o = 0; o < 8; o++) corner[o] = signed_dist(lo + Vec3(float(o & 1), float((o >> 1) & 1), float(o >> 2)) * side);
+        auto off = [&](Vec3 t, float interpolated) {
+          float exact = signed_dist(lo + t * side);
+          return std::fabs(interpolated - exact) > kTolAbs + kTolRel * std::fabs(exact);
+        };
+        float mean = 0;
+        for (float v : corner) mean += v / 8;
+        bool bad = off(Vec3(0.5f, 0.5f, 0.5f), mean);
+        for (int axis = 0; axis < 3 && !bad; axis++)
+          for (int side01 = 0; side01 < 2 && !bad; side01++) {
+            float face = 0;
+            for (int o = 0; o < 8; o++)
+              if (((o >> axis) & 1) == side01) face += corner[o] / 4;
+            Vec3 t(0.5f, 0.5f, 0.5f);
+            t[axis] = float(side01);
+            bad = off(t, face);
+          }
+        split[c] = bad;
       }
     });
     next.clear();
     for (size_t c = 0; c < level.size(); c++) {
       const Cell &cell = level[c];
-      if (cell.side > 1 && dist[c] < (cell.side <= kNearSide ? kNear : kFar) * cell.side * leaf_size) {
+      if (split[c]) {
         uint32_t first = (uint32_t)nodes_.size();
         nodes_[cell.node] = first;
         nodes_.resize(first + 8, 0);

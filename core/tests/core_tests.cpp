@@ -81,8 +81,8 @@ struct Expect {
 static void test_models() {
   const Expect models[] = {{"cube", 12, 8},  {"sphere", 0, 0}, {"cone", -1, 1}, {"table", -1, -1}, {"bed", -1, -1},
                            {"bottle", -1, -1}, {"bowl", -1, -1}, {"sofa", -1, -1}, {"mug", -1, -1}, {"cat", -1, -1}};
-  std::printf("%-7s %6s %6s %5s %8s %8s %7s %6s %6s %8s %8s %8s %8s\n", "model", "tris", "edges", "crnrs", "leaves",
-              "MB", "build s", "minSDF", "wtight", "maxErr", "nearErr", "surfErr", "signBad");
+  std::printf("%-7s %6s %6s %5s %8s %8s %7s %6s %6s %8s %8s %8s %8s %8s\n", "model", "tris", "edges", "crnrs", "leaves",
+              "MB", "build s", "minSDF", "wtight", "outErr", "inErr/D", "nearErr", "surfErr", "signBad");
   for (const Expect &m : models) {
     std::string text = read_file(std::string(MODELS_DIR) + "/" + m.name + ".obj");
     CHECK(!text.empty(), "%s missing", m.name);
@@ -94,7 +94,7 @@ static void test_models() {
 
     // Octree vs exact distances at random points around the shape.
     std::mt19937 rng(1);
-    float maxErr = 0, nearErr = 0, surfErr = 0;
+    float outErr = 0, inErr = 0, nearErr = 0, surfErr = 0;
     int signBad = 0;
     for (int i = 0; i < 20000; i++) {
       float p[3];
@@ -105,7 +105,10 @@ static void test_models() {
       float exact = ss_shape_sdf_exact(s, p[0], p[1], p[2]);
       float approx = ss_shape_sdf(s, p[0], p[1], p[2]);
       float err = std::fabs(exact - approx);
-      maxErr = std::fmax(maxErr, err / std::fmax(1.f, std::fabs(exact) / 0.02f));  // relative far away
+      // Far from the surface, error matters relative to the sound's range D:
+      // guidance outside (D = 0.5 m), contact inside (D = |min SDF|).
+      if (exact >= 0.01f) outErr = std::fmax(outErr, err);
+      if (exact <= -0.01f) inErr = std::fmax(inErr, err / std::fabs(info.min_sdf));
       if (std::fabs(exact) < 0.01f) nearErr = std::fmax(nearErr, err);
       if (std::fabs(exact) < 0.002f) surfErr = std::fmax(surfErr, err);
       // Independent sign check by ray parity.
@@ -116,13 +119,14 @@ static void test_models() {
       for (auto d : dirs) inside += s->bvh.count_hits(x, d) & 1;
       if (std::fabs(exact) > 1e-4f && ((inside >= 2) != (exact < 0))) signBad++;
     }
-    std::printf("%-7s %6zu %6zu %5zu %8zu %8.2f %7.2f %6.3f %6d %8.5f %8.5f %8.5f %8d\n", m.name, info.triangle_count,
+    std::printf("%-7s %6zu %6zu %5zu %8zu %8.2f %7.2f %6.3f %6d %8.5f %8.3f %8.5f %8.5f %8d\n", m.name, info.triangle_count,
                 info.sharp_edge_count, info.corner_count, info.octree_leaves, info.sdf_bytes / 1e6,
-                info.build_seconds, info.min_sdf, info.watertight, maxErr, nearErr, surfErr, signBad);
+                info.build_seconds, info.min_sdf, info.watertight, outErr, inErr, nearErr, surfErr, signBad);
     CHECK(info.watertight, "%s watertight", m.name);
     CHECK(surfErr < 0.001f, "%s SDF error within 2 mm of the surface %f", m.name, surfErr);
     CHECK(nearErr < 0.003f, "%s SDF error within 1 cm of the surface %f", m.name, nearErr);
-    CHECK(maxErr < 0.004f, "%s SDF error %f", m.name, maxErr);
+    CHECK(outErr < 0.01f, "%s SDF error outside %f", m.name, outErr);
+    CHECK(inErr < 0.08f, "%s SDF error inside, relative to |min SDF| %f", m.name, inErr);
     CHECK(signBad < 5, "%s sign mismatches %d", m.name, signBad);
     if (m.edges >= 0) CHECK((int)info.sharp_edge_count == m.edges, "%s edges %zu", m.name, info.sharp_edge_count);
     if (m.corners >= 0) CHECK((int)info.corner_count == m.corners, "%s corners %zu", m.name, info.corner_count);

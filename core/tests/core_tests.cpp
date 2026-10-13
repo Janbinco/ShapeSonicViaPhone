@@ -79,7 +79,7 @@ struct Expect {
 };
 
 static void test_models() {
-  const Expect models[] = {{"cube", 12, 8},  {"sphere", 0, 0}, {"cone", -1, 1}, {"table", -1, -1}, {"bed", -1, -1},
+  const Expect models[] = {{"cube", 12, 8},  {"sphere", 0, 0}, {"torus", 0, 0}, {"cone", -1, 1}, {"table", -1, -1}, {"bed", -1, -1},
                            {"bottle", -1, -1}, {"bowl", -1, -1}, {"sofa", -1, -1}, {"mug", -1, -1}, {"cat", -1, -1}};
   std::printf("%-7s %6s %6s %5s %8s %8s %7s %6s %6s %8s %8s %8s %8s %8s\n", "model", "tris", "edges", "crnrs", "leaves",
               "MB", "build s", "minSDF", "wtight", "outErr", "inErr/D", "nearErr", "surfErr", "signBad");

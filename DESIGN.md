@@ -59,7 +59,8 @@ ios/ShapeSonic/
   Shape.swift              ss_shape wrapper; OBJ via core, PLY/STL/USD(Z)/ABC via ModelIO
   AudioOutput.swift        AVAudioEngine + AVAudioSourceNode calling ss_mixer_render
   ShapeSonic-Bridging-Header.h
-models/                    demo shapes (OBJ, already about 0.4 m, all watertight)
+models/                    demo shapes (OBJ, already about 0.4 m, all watertight;
+                           torus.obj is generated: ring 0.15 m, tube 0.05 m, lying flat)
 audio/                     the sounds, copied from ../demo/audio (trimmed/transcoded there)
 ```
 
@@ -170,8 +171,8 @@ This follows the paper, which used libigl's `sharp_edges` with a threshold
   edges turns by more than the threshold; or a cone-like point whose angle
   deficit `|2π − Σ face angles|` exceeds 70°, such as the apex of a cone, which
   has no sharp edges.
-- Results: cube 12 edges / 8 corners, sphere 0 / 0, cone 32 (the base rim) /
-  1 (the apex). The mug gets the parallel sharp edges along its lip that the
+- Results: cube 12 edges / 8 corners, sphere and torus 0 / 0, cone 32 (the
+  base rim) / 1 (the apex). The mug gets the parallel sharp edges along its lip that the
   paper's participants noticed. The cat is a faceted organic mesh and gets
   spurious edges at 30°, so demo shapes have per-model defaults
   (`AppModel.demoSharpAngles`: cat 50°).
@@ -348,7 +349,7 @@ latency the way the iOS menu does.
   points (< 1 mm within 2 mm of the surface, < 3 mm within 1 cm, < 1 cm
   farther outside, < 8% of |min SDF| deeper inside); sign vs. independent ray
   parity; expected feature
-  counts (cube, sphere, cone); probe cost (< 50 µs for 10 fingers).
+  counts (cube, sphere, torus, cone); probe cost (< 50 µs for 10 fingers).
 - Probe semantics on the cube: quiet contact at the centre, loud contact just
   inside, the guidance falloff value outside, no guidance when all of a hand's
   fingers are inside, edge and corner near a corner, edge only near an edge,

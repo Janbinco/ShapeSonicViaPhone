@@ -60,7 +60,8 @@ ios/ShapeSonic/
   AudioOutput.swift        AVAudioEngine + AVAudioSourceNode calling ss_mixer_render
   ShapeSonic-Bridging-Header.h
 models/                    demo shapes (OBJ, already about 0.4 m, all watertight;
-                           torus.obj is generated: ring 0.15 m, tube 0.05 m, lying flat)
+                           torus.obj is generated: ring 0.15 m, tube 0.05 m, standing upright
+                           with its hole facing the user)
 audio/                     the sounds, copied from ../demo/audio (trimmed/transcoded there)
 ```
 

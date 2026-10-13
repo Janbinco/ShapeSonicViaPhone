@@ -1,0 +1,128 @@
+// The pop-up menu: shape choice and loading, display toggles, hand mode,
+// feature threshold, sound, latency options, placement and screen calibration.
+
+import SwiftUI
+
+struct MenuView: View {
+  @EnvironmentObject var model: AppModel
+  @Environment(\.dismiss) private var dismiss
+  @State private var importing = false
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          ForEach(model.demos) { demo in
+            Button {
+              model.select(demo)
+            } label: {
+              HStack {
+                Text(demo.name.capitalized)
+                Spacer()
+                if model.shapeName == demo.name { Image(systemName: "checkmark") }
+              }
+            }
+          }
+          Button("Load model…") { importing = true }
+          Toggle("Fit loaded models to 40 cm", isOn: $model.fitTo40cm)
+          HStack(alignment: .firstTextBaseline) {
+            if model.loading { ProgressView().padding(.trailing, 4) }
+            Text(model.status)
+              .font(.footnote)
+              .foregroundStyle(model.statusIsError ? .red : .secondary)
+          }
+        } header: {
+          Text("Shape")
+        } footer: {
+          Text("OBJ, PLY, STL, USDZ/USD or Alembic. The shape should be closed (watertight).")
+        }
+
+        Section("Display") {
+          Toggle("Show shape", isOn: $model.showShape)
+          Toggle("Show edges and corners", isOn: $model.showFeatures).disabled(!model.showShape)
+        }
+
+        Section {
+          Picker("Hands", selection: $model.handMode) {
+            ForEach(HandMode.allCases) { Text($0.label).tag($0) }
+          }
+          .pickerStyle(.segmented)
+        } header: {
+          Text("Hands")
+        } footer: {
+          Text(model.handMode == .split
+               ? "A touch belongs to the left hand if it starts on the left half of the screen."
+               : "The first five touches are the left hand and the next five the right hand.")
+            + Text(model.engine.screenGeometry.isIPad ? "" : " iPhone screens track at most five touches at once.")
+        }
+
+        Section {
+          VStack(alignment: .leading) {
+            Text("Sharp edge angle: \(Int(model.sharpAngle))°")
+            Slider(value: $model.sharpAngle, in: 5...120, step: 1) { editing in
+              if !editing { model.sharpAngleCommitted() }
+            }
+          }
+        } header: {
+          Text("Edges and corners")
+        } footer: {
+          Text("An edge is sharp where its faces meet at more than this angle.")
+        }
+
+        Section("Sound") {
+          HStack {
+            Image(systemName: "speaker.fill")
+            Slider(value: $model.volume, in: 0...1)
+            Image(systemName: "speaker.wave.3.fill")
+          }
+        }
+
+        Section {
+          Toggle("Predict device motion", isOn: $model.predictMotion)
+          Toggle("Use predicted touches", isOn: $model.predictTouches)
+          Text(model.latencyText).font(.footnote).foregroundStyle(.secondary)
+        } header: {
+          Text("Latency")
+        } footer: {
+          Text("Motion prediction brings the camera pose forward to now with the gyroscope. "
+               + "Wired headphones or the speaker are much faster than Bluetooth (150–300 ms).")
+        }
+
+        Section("Placement") {
+          Button("Place in front of me", action: model.recenter)
+          if model.stage.isAR {
+            Button("Place on surface at screen centre", action: model.placeOnSurface)
+            if let message = model.surfaceMessage {
+              Text(message).font(.footnote).foregroundStyle(.secondary)
+            }
+          } else {
+            VStack(alignment: .leading) {
+              Text(String(format: "Virtual device moved forward %.0f cm", model.virtualAdvance * 100))
+              Slider(value: $model.virtualAdvance, in: 0...0.9)
+            }
+          }
+        }
+
+        Section {
+          Text(model.screenText)
+          Stepper(value: $model.ppiOverride, in: 0...600, step: 1) {
+            Text(model.ppiOverride > 0 ? "Override: \(Int(model.ppiOverride)) ppi" : "Override: off")
+          }
+        } header: {
+          Text("Screen")
+        } footer: {
+          Text("Touches are placed on the glass using the screen's pixel density. "
+               + "Override it only if this device isn't recognised.")
+        }
+      }
+      .navigationTitle("ShapeSonic")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+      }
+      .fileImporter(isPresented: $importing, allowedContentTypes: AppModel.importTypes) { result in
+        if case .success(let url) = result { model.importFile(url) }
+      }
+    }
+  }
+}

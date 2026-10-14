@@ -58,6 +58,7 @@ ios/ShapeSonic/
   Visualizer.swift         RealityKit meshes: translucent shape, edge tubes, corner dots/ranges
   Shape.swift              ss_shape wrapper; OBJ via core, PLY/STL/USD(Z)/ABC via ModelIO
   AudioOutput.swift        AVAudioEngine + AVAudioSourceNode calling ss_mixer_render
+  Haptics.swift            Core Haptics tap when a fingertip crosses the surface
   ShapeSonic-Bridging-Header.h
 models/                    demo shapes (OBJ, already about 0.4 m, all watertight;
                            torus.obj is generated: ring 0.15 m, tube 0.05 m, standing upright
@@ -79,6 +80,7 @@ audio/                     the sounds, copied from ../demo/audio (trimmed/transc
                                 glass point (camera frame) ── PoseProvider.transform(now) ──► world
                                 ── worldToShape ──► shape-local
                               ss_probe ──► levels[2] ──► ss_mixer_set_levels (atomics)
+                              a fingertip crossed the surface? ──► Haptics tap
                                                                │
                                        audio thread: ss_mixer_render ◄─ AVAudioSourceNode
 ```
@@ -282,6 +284,24 @@ sound:
    150–300 ms; use wired headphones or the speaker for the lowest latency.
 4. Rendering (RealityKit) is never on this path.
 
+### Haptics (`Haptics.swift`)
+
+A fingertip crossing the surface also gives a tap: a sharp, strong one going
+in, the haptic counterpart of the abrupt contact sound, and a softer one coming
+out. A finger that touches down already inside counts as entering. The tap is
+fired from the same synchronous `Engine.update` that switches the contact
+sound, so the two coincide. Core Haptics' engine is kept running
+(`isAutoShutdownEnabled = false`) with the patterns built in advance, to
+avoid any spin-up delay, and it is restarted after a reset or when the app
+returns to the foreground. Taps closer than 40 ms on the same finger are
+dropped, so a finger resting on the surface doesn't buzz with tracking noise.
+There is a menu toggle (on by default). iPads have no Taptic Engine, so there
+the toggle is disabled.
+
+The haptics are felt in the hand holding the device, not at the fingertip,
+and all fingers share them, so they say *when* a crossing happened while the
+pentatonic notes say *which* finger.
+
 ### Placement
 
 The shape's frame is gravity-aligned (ARKit `.gravity`), with +y up. When
@@ -298,8 +318,8 @@ horizontal plane and rests the shape's base on it.
   one is checked, which is the only place its name appears); **Load model…**
   (OBJ, PLY, STL, USD/USDZ, Alembic) and *Fit loaded models to 40 cm*; a status
   line (edges, corners, SDF memory and build time, errors); Show shape and Show
-  edges and corners; Hands; the sharp-edge angle; volume; the latency options and
-  the measured output latency; placement; screen ppi and its override.
+  edges and corners; Hands; the sharp-edge angle; volume and the
+  surface-crossing vibration; the latency options and the measured output latency; placement; screen ppi and its override.
 - **Visualization** (hidden by default): a translucent mesh, smooth-shaded
   except across creases sharper than the edge threshold, sharp edges as orange
   1.5 mm tubes, corners as red dots with translucent 2 cm range spheres.

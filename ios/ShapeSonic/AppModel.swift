@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 final class AppModel: ObservableObject {
   let pose = PoseProvider()
   let audio = AudioOutput()
+  let haptics = Haptics()
   let engine: Engine
   let stage: Stage
 
@@ -40,6 +41,7 @@ final class AppModel: ObservableObject {
   @Published var predictMotion: Bool {
     didSet {
       pose.predict = predictMotion
+    haptics.enabled = vibrateOnCrossing
       UserDefaults.standard.set(predictMotion, forKey: "predictMotion")
     }
   }
@@ -47,6 +49,12 @@ final class AppModel: ObservableObject {
     didSet {
       engine.usePredictedTouches = predictTouches
       UserDefaults.standard.set(predictTouches, forKey: "predictTouches")
+    }
+  }
+  @Published var vibrateOnCrossing: Bool {
+    didSet {
+      haptics.enabled = vibrateOnCrossing
+      UserDefaults.standard.set(vibrateOnCrossing, forKey: "vibrateOnCrossing")
     }
   }
   @Published var fitTo40cm = true
@@ -78,6 +86,7 @@ final class AppModel: ObservableObject {
     volume = d.object(forKey: "volume") as? Float ?? 0.8
     predictMotion = d.object(forKey: "predictMotion") as? Bool ?? true
     predictTouches = d.bool(forKey: "predictTouches")
+    vibrateOnCrossing = d.object(forKey: "vibrateOnCrossing") as? Bool ?? true
     ppiOverride = d.double(forKey: "ppiOverride")
     let dir = Bundle.main.url(forResource: "models", withExtension: nil)
     let files = (try? FileManager.default.contentsOfDirectory(at: dir ?? URL(fileURLWithPath: "/"),
@@ -90,8 +99,12 @@ final class AppModel: ObservableObject {
     engine.usePredictedTouches = predictTouches
     engine.screenGeometry.overridePPI = ppiOverride
     pose.predict = predictMotion
+    haptics.enabled = vibrateOnCrossing
     stage.touchView.showMidline = handMode == .split
     engine.onFingersChanged = { [weak self] in self?.stage.touchView.redraw() }
+    engine.onCrossing = { [weak self] finger, entered, time in
+      self?.haptics.crossed(finger: finger, entered: entered, at: time)
+    }
     pose.onMotionSample = { [weak self] in
       guard let self, self.pose.predict, !self.engine.fingers.isEmpty else { return }
       self.engine.update()
@@ -116,9 +129,11 @@ final class AppModel: ObservableObject {
     case .active:
       stage.resume()
       pose.startMotion()
+      haptics.start()
     case .background:
       stage.pause()
       pose.stopMotion()
+      haptics.stop()
       engine.clearFingers()
     default: break
     }

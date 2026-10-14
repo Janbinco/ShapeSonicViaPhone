@@ -69,12 +69,20 @@ struct MenuView: View {
           Text("An edge is sharp where its faces meet at more than this angle.")
         }
 
-        Section("Sound") {
+        Section {
           HStack {
             Image(systemName: "speaker.fill")
             Slider(value: $model.volume, in: 0...1)
             Image(systemName: "speaker.wave.3.fill")
           }
+          Toggle("Vibrate when crossing the surface", isOn: $model.vibrateOnCrossing)
+            .disabled(!model.haptics.isSupported)
+        } header: {
+          Text("Sound and touch")
+        } footer: {
+          Text(model.haptics.isSupported
+               ? "A sharp tap when a fingertip enters the shape, a softer one when it leaves."
+               : "This device has no Taptic Engine.")
         }
 
         Section {

@@ -50,6 +50,9 @@ final class Engine {
   private(set) var fingers: [ObjectIdentifier: Finger] = [:]
   /// Called after touches change or a finger crosses the surface (for drawing).
   var onFingersChanged: (() -> Void)?
+  /// Called for each fingertip that crosses the surface (entered = now inside).
+  /// A finger that touches down inside the shape counts as entering.
+  var onCrossing: ((_ finger: ObjectIdentifier, _ entered: Bool, _ time: CFTimeInterval) -> Void)?
 
   // Scratch buffers, reused so the per-event path does not allocate.
   private var keys: [ObjectIdentifier] = []
@@ -122,7 +125,8 @@ final class Engine {
       if touchesChanged { onFingersChanged?() }
       return
     }
-    let camera = pose.transform(at: CACurrentMediaTime())
+    let now = CACurrentMediaTime()
+    let camera = pose.transform(at: now)
     let toShape = worldToShape * camera
     keys.removeAll(keepingCapacity: true)
     probeInput.removeAll(keepingCapacity: true)
@@ -141,9 +145,12 @@ final class Engine {
 
     var crossed = false
     for (i, id) in keys.enumerated() {
-      let was = fingers[id]!.probe.sdf <= 0
+      let was = fingers[id]!.probe.sdf <= 0, inside = probeOutput[i].sdf <= 0
       fingers[id]!.probe = probeOutput[i]
-      if was != (probeOutput[i].sdf <= 0) { crossed = true }
+      if was != inside {
+        crossed = true
+        onCrossing?(id, inside, now)
+      }
     }
     if touchesChanged || crossed { onFingersChanged?() }
   }

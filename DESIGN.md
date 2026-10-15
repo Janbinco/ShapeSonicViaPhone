@@ -44,6 +44,7 @@ core/                      portable C++17, no platform dependencies (shared with
   src/shape.cpp            OBJ parser, weld/normalize, pseudonormals, build, sharp edges and corners
   src/sonify.cpp           fingertips -> per-hand levels (paper's falloff table)
   src/mixer.cpp            real-time mixer (loops, plucks, gain smoothing)
+  src/hands.cpp            hands in the air: fingertip depth, unprojection, one-euro filter, placement
   tests/core_tests.cpp     CTest: OBJ parsing, SDF accuracy/sign on all models, features, probe, mixer
   CMakeLists.txt
 ios/ShapeSonic.xcodeproj   app project (synchronized folders; shared scheme)
@@ -59,6 +60,8 @@ ios/ShapeSonic/
   Shape.swift              ss_shape wrapper; OBJ via core, PLY/STL/USD(Z)/ABC via ModelIO
   AudioOutput.swift        AVAudioEngine + AVAudioSourceNode calling ss_mixer_render
   Haptics.swift            Core Haptics tap when a fingertip crosses the surface
+  HandTracker.swift        hands in the air: TrueDepth colour + depth, Vision hand pose -> 3D fingertips
+  AirView.swift            hands in the air: camera picture, fingertip dots, status and readout
   ShapeSonic-Bridging-Header.h
 models/                    demo shapes (OBJ, already about 0.4 m, all watertight;
                            torus.obj is generated: ring 0.15 m, tube 0.05 m, standing upright
@@ -341,6 +344,66 @@ horizontal plane and rests the shape's base on it.
   indicator is hidden. On iPad, turn off the four- and five-finger multitasking
   gestures in Settings, or they will take multi-finger touches.
 
+## Hands in the air (front depth camera)
+
+A second input mode, chosen under **Input** in the menu (remembered). Instead
+of fingers on the glass of a moving phone, the phone **stays still**, standing
+up facing the user or lying flat with the screen up, and the user reaches
+into an invisible shape floating in front of the screen with both hands. The
+core (SDF, features, probe, mixer) is unchanged; only where the fingertips
+come from differs. It needs a TrueDepth (Face ID) camera.
+
+**Pipeline** (`HandTracker.swift`, on its own queue, per camera frame):
+
+1. `AVCaptureSession` on the front TrueDepth camera, VGA colour plus the
+   highest-resolution depth format, synchronized by
+   `AVCaptureDataOutputSynchronizer`; depth filtering on (fills holes). Buffers
+   are used unrotated and unmirrored, so the depth intrinsics
+   (`AVCameraCalibrationData`, scaled from its reference dimensions to the depth
+   map; a pinhole from the field of view as a fallback) apply directly.
+2. Vision `VNDetectHumanHandPoseRequest`, up to 2 hands, on the colour image
+   with the orientation that puts the device's top up, so hands look upright.
+   Its points are mapped back to buffer coordinates.
+3. Each fingertip with confidence ≥ 0.3: depth from `ss_fingertip_depth`
+   (core), which samples a small disc 25% of the way from the tip toward the
+   next joint (on the finger pad, not its silhouette, where depth mixes with
+   the background) and takes the 20th percentile (the finger is the nearest
+   surface there).
+4. `ss_unproject` gives the camera-frame point, which is rotated into the
+   device frame (CoreMotion's: +x right, +y top, +z out of the screen). For an
+   unmirrored front camera the buffer's columns run along device −y and its
+   rows along +x; **Camera calibration** in the menu can rotate or mirror this
+   if a device differs.
+
+**Fingers and hands** (`Engine.setAirHands`, main thread): each finger keeps
+its own note: thumb C, index D, middle E, ring G, little A. With two hands, the
+one further to the user's left (the shape's −x) is the left hand. With one
+hand, Vision's chirality decides, corrected by a running vote of how its
+chirality compared with position whenever both hands were visible. Positions
+are smoothed with a one-euro filter (`ss_one_euro3`, min cutoff 2 Hz, β 8 per
+m/s; menu toggle), keyed by hand and finger.
+
+**Placement** (`ss_air_placement`): the shape's centre is `distance` along the
+device's +z (default 30 cm), level with gravity (CoreMotion), its front facing
+the user: along the device's +z when standing, toward its bottom edge when
+flat. It is scaled to **Shape size** (default 20 cm, since the front camera
+sees about 35 cm across at 30 cm), so all sound ranges scale with it, except
+edge and corner ranges, which stay 2 cm in the real world so tracking noise
+doesn't hide them. It is placed when the mode starts (after the first gravity
+sample) and on **Recenter**.
+
+**Screen** (`AirView.swift`): the camera picture, dimmed; a dot per fingertip
+in its hand's colour with its note (filled when inside, only while the shape
+is shown); a status line; and, while the shape is shown, each hand's index
+fingertip in the shape's frame (cm), to check directions. ARKit is paused
+in this mode. Haptics are off (they would shake the phone, not the hand).
+
+**Untested on a device so far**; expected limits: latency is a camera frame
+plus Vision (≈ 50–100 ms, versus a touch event); fingers hidden behind others
+drop out; TrueDepth works from about 20 cm; Vision needs light. The
+calibration controls exist because the buffer orientation has not been
+verified on hardware.
+
 ## Android: is a parallel build worth it?
 
 Yes, if it is wanted, and the code is arranged so that it costs little. Everything
@@ -383,6 +446,9 @@ latency the way the iOS menu does.
   inside, the guidance falloff value outside, no guidance when all of a hand's
   fingers are inside, edge and corner near a corner, edge only near an edge,
   and the re-detection threshold.
+- Hands in the air: fingertip depth on a synthetic finger in front of a wall,
+  invalid depth, unprojection, one-euro jitter reduction and step response,
+  placement for a standing and a flat device.
 - Mixer: silent at rest, the left hand only in the left ear, contact within a
   few ms, a pluck starting in the first buffer (silence trimmed), and the
   render cost.

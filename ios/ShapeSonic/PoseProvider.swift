@@ -20,6 +20,9 @@ final class PoseProvider {
   var predict = true
   /// Called on the main queue for each motion sample.
   var onMotionSample: (() -> Void)?
+  /// Gravity in CoreMotion's device frame (+x right, +y top, +z out of the
+  /// screen), in g; nil until the first motion sample.
+  private(set) var gravity: SIMD3<Float>?
 
   private var velocity = SIMD3<Float>(repeating: 0)
   private var lastPosition: SIMD3<Float>?
@@ -36,6 +39,7 @@ final class PoseProvider {
       guard let self, let data else { return }
       // CoreMotion's device frame: +x right (portrait), +y top, +z out of the screen.
       // ARKit's camera frame: +x toward the bottom, +y right, +z out of the screen.
+      self.gravity = SIMD3(Float(data.gravity.x), Float(data.gravity.y), Float(data.gravity.z))
       let r = data.rotationRate
       self.gyro.append((data.timestamp, SIMD3(Float(-r.y), Float(r.x), Float(r.z))))
       if self.gyro.count > 64 { self.gyro.removeFirst(self.gyro.count - 64) }

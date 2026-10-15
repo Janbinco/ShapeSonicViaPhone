@@ -148,6 +148,52 @@ void ss_mixer_set_output_rate(ss_mixer *mixer, double output_sample_rate);
 /* Audio thread: render frames of non-interleaved stereo (overwrites the buffers). */
 void ss_mixer_render(ss_mixer *mixer, float *left, float *right, size_t frames);
 
+/* ---- Hands in the air (depth camera) ---------------------------------------
+ * Helpers for tracking fingertips with a depth camera instead of the glass:
+ * the platform layer finds 2D hand joints (e.g. Vision on iOS) and a depth
+ * map; these turn them into 3D fingertips and place the shape in front of a
+ * device that stays still. Camera frame: x along the image's columns, y along
+ * its rows, z along the optical axis, in metres. */
+
+typedef struct {
+  float fx, fy, cx, cy; /* pinhole intrinsics, in depth-map pixels */
+} ss_intrinsics;
+
+/* Depth (m) at a fingertip, from a depth map of width x height floats with
+ * row_stride floats per row. Samples a disc of radius_px around the point 25%
+ * of the way from the tip (tip_u, tip_v) toward the next joint (dip_u, dip_v),
+ * which lies on the finger pad rather than on its silhouette, and returns a
+ * low percentile of the valid samples (the finger is the nearest surface
+ * there). NAN if there is no valid depth. */
+float ss_fingertip_depth(const float *depth, int width, int height, size_t row_stride, float tip_u,
+                         float tip_v, float dip_u, float dip_v, float radius_px);
+
+/* Pixel (u, v) at depth z -> camera-frame point. */
+void ss_unproject(const ss_intrinsics *k, float u, float v, float z, float out[3]);
+
+/* One-euro filter (Casiez et al. 2012) for a 3D point: little smoothing when
+ * moving fast (low lag), more when still (low jitter). */
+typedef struct {
+  float min_cutoff; /* Hz, smoothing when still */
+  float beta;       /* cutoff increase per m/s */
+  float d_cutoff;   /* Hz, for the speed estimate */
+  float x[3], dx[3];
+  double t;
+  int initialized;
+} ss_one_euro3;
+
+void ss_one_euro3_init(ss_one_euro3 *f, float min_cutoff, float beta);
+void ss_one_euro3_filter(ss_one_euro3 *f, const float in[3], double t, float out[3]);
+
+/* Shape placement for a still device: the shape's centre is `distance` metres
+ * along the device's +z axis (out of the screen, where the front camera
+ * looks), its +y is up (against `gravity`, given in device coordinates), and
+ * its front (+z) faces the user: horizontally along the device's +z when the
+ * device stands up, or toward the device's bottom edge when it lies flat.
+ * `scale` shrinks or grows the shape. Writes the column-major 4x4 matrix
+ * from shape-local to device coordinates. */
+void ss_air_placement(const float gravity[3], float distance, float scale, float shape_to_device[16]);
+
 #ifdef __cplusplus
 }
 #endif

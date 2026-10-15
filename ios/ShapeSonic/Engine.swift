@@ -3,6 +3,10 @@
 //
 // It runs on the main thread, synchronously, on every touch event, every ARKit
 // frame and every motion sample, so nothing waits for the next display frame.
+//
+// In the "hands in the air" input mode, fingertips come from the front depth
+// camera instead (HandTracker): the device stays still, the shape floats in
+// front of it in the device frame, and each camera frame is probed.
 
 import QuartzCore
 import UIKit
@@ -15,7 +19,23 @@ enum HandMode: String, CaseIterable, Identifiable {
   var label: String { self == .split ? "Screen halves" : "Touch order" }
 }
 
+enum InputMode: String, CaseIterable, Identifiable {
+  case glass  // fingers on the screen, the phone moves through the shape (ARKit)
+  case air  // the phone stays still; the front depth camera tracks the hands
+  var id: String { rawValue }
+  var label: String { self == .glass ? "Touch the glass" : "Hands in the air" }
+}
+
 final class Engine {
+  /// A fingertip tracked by the depth camera.
+  struct AirTip {
+    var hand: Int
+    var slot: Int
+    var device: SIMD3<Float>  // metres, device frame (smoothed)
+    var image: CGPoint  // normalized sensor-buffer point, for drawing
+    var probe = ss_finger_probe(sdf: .infinity, edge: .infinity, corner: .infinity)
+  }
+
   struct Finger {
     var hand: Int
     var slot: Int
@@ -48,6 +68,25 @@ final class Engine {
   }()
 
   private(set) var fingers: [ObjectIdentifier: Finger] = [:]
+
+  // MARK: Hands in the air
+  var inputMode: InputMode = .glass {
+    didSet {
+      clearFingers()
+      setAirHands([], time: 0)
+    }
+  }
+  /// Shape-local from device coordinates (includes the air-mode scale).
+  var deviceToShape = matrix_identity_float4x4
+  /// Scale of the shape in air mode; edge and corner ranges are kept at their
+  /// real-world size (2 cm) so tracking noise doesn't hide them.
+  var airScale: Float = 0.5
+  var airSmoothing = true
+  private(set) var airTips: [AirTip] = []
+  private var airFilters: [Int: ss_one_euro3] = [:]
+  /// Votes on whether Vision's chirality matches left/right by position.
+  private var chiralityAgrees = 0, chiralityDisagrees = 0
+
   /// Called after touches change or a finger crosses the surface (for drawing).
   var onFingersChanged: (() -> Void)?
   /// Called for each fingertip that crosses the surface (entered = now inside).
@@ -120,6 +159,10 @@ final class Engine {
 
   /// Recompute every fingertip's position and the sound levels, now.
   func update(touchesChanged: Bool = false) {
+    if inputMode == .air {
+      updateAir()
+      return
+    }
     guard let shape, let screen, !fingers.isEmpty else {
       audio.silence()
       if touchesChanged { onFingersChanged?() }
@@ -153,5 +196,91 @@ final class Engine {
       }
     }
     if touchesChanged || crossed { onFingersChanged?() }
+  }
+
+  // MARK: Air mode
+
+  /// Hands from the depth camera: assign left/right, smooth, probe.
+  func setAirHands(_ hands: [TrackedHand], time: TimeInterval) {
+    // Left/right by position across the shape (its +x is the user's right).
+    func meanX(_ h: TrackedHand) -> Float {
+      let xs = h.tips.map { (deviceToShape * SIMD4($0.device, 1)).x }
+      return xs.reduce(0, +) / Float(max(xs.count, 1))
+    }
+    var assigned: [(hand: Int, data: TrackedHand)] = []
+    if hands.count >= 2 {
+      let sorted = hands.prefix(2).sorted { meanX($0) < meanX($1) }
+      assigned = [(0, sorted[0]), (1, sorted[1])]
+      if sorted[0].chirality >= 0, sorted[1].chirality >= 0, sorted[0].chirality != sorted[1].chirality {
+        if sorted[0].chirality == 0 { chiralityAgrees += 1 } else { chiralityDisagrees += 1 }
+      }
+    } else if let h = hands.first {
+      var hand = meanX(h) < 0 ? 0 : 1
+      if h.chirality >= 0 {
+        hand = chiralityDisagrees > chiralityAgrees ? 1 - h.chirality : h.chirality
+      }
+      assigned = [(hand, h)]
+    }
+    var tips: [AirTip] = []
+    var seen = Set<Int>()
+    let old = Dictionary(uniqueKeysWithValues: airTips.map { ($0.hand * 8 + $0.slot, $0.probe) })
+    for (hand, h) in assigned {
+      for t in h.tips {
+        let key = hand * 8 + t.slot
+        seen.insert(key)
+        var p = t.device
+        if airSmoothing {
+          var f = airFilters[key] ?? {
+            var f = ss_one_euro3()
+            ss_one_euro3_init(&f, 2.0, 8.0)
+            return f
+          }()
+          let input: [Float] = [p.x, p.y, p.z]
+          var out: [Float] = [0, 0, 0]
+          ss_one_euro3_filter(&f, input, time, &out)
+          airFilters[key] = f
+          p = SIMD3(out[0], out[1], out[2])
+        }
+        var tip = AirTip(hand: hand, slot: t.slot, device: p, image: t.image)
+        if let probe = old[key] { tip.probe = probe }
+        tips.append(tip)
+      }
+    }
+    for key in airFilters.keys where !seen.contains(key) { airFilters[key] = nil }
+    airTips = tips
+    updateAir()
+  }
+
+  private func updateAir() {
+    guard let shape, !airTips.isEmpty else {
+      audio.silence()
+      lastLevels = [ss_hand_levels(), ss_hand_levels()]
+      onFingersChanged?()
+      return
+    }
+    var p = params
+    let range = 0.02 / max(airScale, 0.05)
+    p.edge_range = max(p.edge_range, range)
+    p.corner_range = max(p.corner_range, range)
+    probeInput.removeAll(keepingCapacity: true)
+    for t in airTips {
+      let q = deviceToShape * SIMD4(t.device, 1)
+      probeInput.append(ss_finger(x: q.x, y: q.y, z: q.z, hand: Int32(t.hand), slot: Int32(t.slot)))
+    }
+    if probeOutput.count < probeInput.count {
+      probeOutput.append(contentsOf: repeatElement(ss_finger_probe(), count: probeInput.count - probeOutput.count))
+    }
+    ss_probe(shape.ptr, &p, probeInput, probeInput.count, &levels, &probeOutput)
+    audio.setLevels(levels)
+    lastLevels = levels
+    for i in airTips.indices { airTips[i].probe = probeOutput[i] }
+    onFingersChanged?()
+  }
+
+  /// A fingertip's position in the shape's frame, in metres of the real world
+  /// (for the on-screen readout).
+  func airLocal(_ t: AirTip) -> SIMD3<Float> {
+    let q = deviceToShape * SIMD4(t.device, 1)
+    return SIMD3(q.x, q.y, q.z) * airScale
   }
 }

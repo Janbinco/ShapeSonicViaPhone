@@ -234,7 +234,63 @@ static void test_mixer() {
   ss_mixer_destroy(m);
 }
 
+
+static void test_hands() {
+  // Depth at a fingertip: a finger at 0.30 m in front of a wall at 0.80 m.
+  const int w = 64, h = 48;
+  std::vector<float> depth(w * h, 0.80f);
+  for (int v = 10; v < 40; v++)
+    for (int u = 30; u < 36; u++) depth[v * w + u] = 0.30f;  // vertical finger, tip at v = 10
+  depth[20 * w + 32] = NAN;
+  float z = ss_fingertip_depth(depth.data(), w, h, w, 33, 10, 33, 18, 2);
+  CHECK(std::fabs(z - 0.30f) < 1e-6f, "fingertip depth %f", z);
+  z = ss_fingertip_depth(depth.data(), w, h, w, 5, 5, 5, 8, 2);
+  CHECK(std::fabs(z - 0.80f) < 1e-6f, "background depth %f", z);
+  std::vector<float> empty(w * h, 0.0f);
+  CHECK(std::isnan(ss_fingertip_depth(empty.data(), w, h, w, 10, 10, 10, 12, 2)), "no valid depth -> NAN");
+
+  // Unprojection.
+  ss_intrinsics k{500, 500, 320, 240};
+  float p[3];
+  ss_unproject(&k, 420, 140, 0.5f, p);
+  CHECK(std::fabs(p[0] - 0.1f) < 1e-6f && std::fabs(p[1] + 0.1f) < 1e-6f && p[2] == 0.5f, "unproject %f %f %f", p[0], p[1], p[2]);
+
+  // One-euro: passes the first sample, converges to a still target, follows a step.
+  ss_one_euro3 f;
+  ss_one_euro3_init(&f, 2.0f, 8.0f);
+  float in[3] = {0.1f, 0.2f, 0.3f}, out[3];
+  ss_one_euro3_filter(&f, in, 0.0, out);
+  CHECK(out[0] == 0.1f && out[2] == 0.3f, "first sample passes through");
+  float noisy_max = 0;
+  std::mt19937 rng(1);
+  std::normal_distribution<float> noise(0, 0.003f);
+  for (int i = 1; i <= 60; i++) {
+    float n[3] = {0.1f + noise(rng), 0.2f + noise(rng), 0.3f + noise(rng)};
+    ss_one_euro3_filter(&f, n, i / 30.0, out);
+    if (i > 30) noisy_max = std::fmax(noisy_max, std::fabs(out[0] - 0.1f));
+  }
+  CHECK(noisy_max < 0.003f, "jitter reduced below the 3 mm noise (max error %f)", noisy_max);
+  float step[3] = {0.2f, 0.2f, 0.3f};
+  for (int i = 61; i <= 66; i++) ss_one_euro3_filter(&f, step, i / 30.0, out);
+  CHECK(std::fabs(out[0] - 0.2f) < 0.01f, "a 10 cm step is followed within 6 frames (%f)", out[0]);
+
+  // Placement: device standing upright (gravity along -y): shape in front, y up, front toward the user.
+  float m[16];
+  const float g_up[3] = {0, -1, 0};
+  ss_air_placement(g_up, 0.3f, 0.5f, m);
+  CHECK(std::fabs(m[14] - 0.3f) < 1e-6f && std::fabs(m[5] - 0.5f) < 1e-6f && std::fabs(m[10] - 0.5f) < 1e-6f &&
+            std::fabs(m[0] - 0.5f) < 1e-6f,
+        "upright placement");
+  // Flat on a table, screen up (gravity along -z): shape above, its front toward the bottom edge.
+  const float g_flat[3] = {0, 0, -1};
+  ss_air_placement(g_flat, 0.3f, 1.0f, m);
+  CHECK(std::fabs(m[6] - 1) < 1e-6f, "flat: shape y = device z (%f)", m[6]);
+  CHECK(std::fabs(m[9] + 1) < 1e-6f, "flat: shape front = device -y (%f)", m[9]);
+  CHECK(std::fabs(m[0] - 1) < 1e-6f, "flat: shape x = device x (%f)", m[0]);
+}
+
 int main() {
+  test_hands();
   test_obj_parsing();
   test_probe();
   test_mixer();

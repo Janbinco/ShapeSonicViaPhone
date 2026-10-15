@@ -13,7 +13,7 @@ endif()
 
 find_package(Threads REQUIRED)
 add_library(shapesonic STATIC
-  src/geometry.cpp src/octree.cpp src/shape.cpp src/sonify.cpp src/mixer.cpp)
+  src/geometry.cpp src/octree.cpp src/shape.cpp src/sonify.cpp src/mixer.cpp src/hands.cpp)
 target_include_directories(shapesonic PUBLIC include)
 target_link_libraries(shapesonic PUBLIC Threads::Threads)
 if(NOT MSVC)

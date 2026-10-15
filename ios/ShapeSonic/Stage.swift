@@ -3,6 +3,9 @@
 //
 // Without ARKit (the Simulator), the view renders without a camera and the
 // device pose is a virtual one that the menu can move toward the shape.
+//
+// In "hands in the air" mode, ARKit is paused (the front camera is in use) and
+// an AirView with the front camera's picture covers the stage.
 
 import ARKit
 import RealityKit
@@ -12,7 +15,10 @@ final class Stage: NSObject, ARSessionDelegate {
   let container = UIView()
   let arView: ARView
   let touchView = TouchView()
+  let airView = AirView()
   let visualizer = Visualizer()
+  /// Hands-in-the-air mode: ARKit stays paused.
+  private(set) var airMode = false
   let isAR = ARWorldTrackingConfiguration.isSupported
   let engine: Engine
   var onTrackingChanged: ((String?) -> Void)?
@@ -33,7 +39,8 @@ final class Stage: NSObject, ARSessionDelegate {
     super.init()
     arView.renderOptions.formUnion([.disableMotionBlur, .disableDepthOfField])
     arView.scene.addAnchor(visualizer.anchor)
-    for v in [arView, touchView] {
+    airView.isHidden = true
+    for v in [arView, touchView, airView] {
       v.frame = container.bounds
       v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
       container.addSubview(v)
@@ -51,7 +58,9 @@ final class Stage: NSObject, ARSessionDelegate {
 
   func start() {
     engine.screen = touchView.window?.screen
-    if isAR {
+    if isAR && airMode {
+      onTrackingChanged?(nil)
+    } else if isAR {
       let config = ARWorldTrackingConfiguration()
       config.worldAlignment = .gravity
       config.planeDetection = [.horizontal]
@@ -69,7 +78,34 @@ final class Stage: NSObject, ARSessionDelegate {
   }
 
   func resume() {
-    if isAR, let config = arView.session.configuration { arView.session.run(config) }
+    guard isAR, !airMode else { return }
+    if let config = arView.session.configuration {
+      arView.session.run(config)
+    } else {
+      let config = ARWorldTrackingConfiguration()
+      config.worldAlignment = .gravity
+      config.planeDetection = [.horizontal]
+      arView.session.delegate = self
+      arView.session.run(config)
+    }
+  }
+
+  /// Switch between the glass (ARKit) and hands-in-the-air stages.
+  func setAirMode(_ on: Bool) {
+    guard on != airMode else { return }
+    airMode = on
+    airView.isHidden = !on
+    touchView.isHidden = on
+    arView.isHidden = on
+    if on {
+      pause()
+    } else {
+      resume()
+    }
+  }
+
+  func redraw() {
+    if airMode { airView.redraw(engine: engine) } else { touchView.redraw() }
   }
 
   // MARK: Placement

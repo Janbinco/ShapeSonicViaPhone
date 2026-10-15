@@ -192,7 +192,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../core/include";
 				INFOPLIST_KEY_CFBundleDisplayName = ShapeSonic;
-				INFOPLIST_KEY_NSCameraUsageDescription = "ShapeSonic uses the camera to track where the device is in space, so that touches on the screen can be placed relative to the invisible shape.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "ShapeSonic uses the back camera to track where the device is in space, and the front depth camera to track your hands, so that your fingertips can be placed relative to the invisible shape.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "ShapeSonic uses motion sensors to keep up with the device between camera frames.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -224,7 +224,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../core/include";
 				INFOPLIST_KEY_CFBundleDisplayName = ShapeSonic;
-				INFOPLIST_KEY_NSCameraUsageDescription = "ShapeSonic uses the camera to track where the device is in space, so that touches on the screen can be placed relative to the invisible shape.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "ShapeSonic uses the back camera to track where the device is in space, and the front depth camera to track your hands, so that your fingertips can be placed relative to the invisible shape.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "ShapeSonic uses motion sensors to keep up with the device between camera frames.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

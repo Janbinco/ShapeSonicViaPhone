@@ -5,8 +5,8 @@
 // frame and every motion sample, so nothing waits for the next display frame.
 //
 // In the "hands in the air" input mode, fingertips come from the front depth
-// camera instead (HandTracker): the device stays still, the shape floats in
-// front of it in the device frame, and each camera frame is probed.
+// camera instead (HandTracker), as world points; the shape is fixed in the
+// world exactly as for touches, and each camera frame is probed.
 
 import QuartzCore
 import UIKit
@@ -21,7 +21,7 @@ enum HandMode: String, CaseIterable, Identifiable {
 
 enum InputMode: String, CaseIterable, Identifiable {
   case glass  // fingers on the screen, the phone moves through the shape (ARKit)
-  case air  // the phone stays still; the front depth camera tracks the hands
+  case air  // the front depth camera tracks the hands; the shape stays fixed in the world
   var id: String { rawValue }
   var label: String { self == .glass ? "Touch the glass" : "Hands in the air" }
 }
@@ -31,8 +31,7 @@ final class Engine {
   struct AirTip {
     var hand: Int
     var slot: Int
-    var device: SIMD3<Float>  // metres, device frame (smoothed)
-    var image: CGPoint  // normalized sensor-buffer point, for drawing
+    var world: SIMD3<Float>  // metres, world frame (smoothed)
     var probe = ss_finger_probe(sdf: .infinity, edge: .infinity, corner: .infinity)
   }
 
@@ -76,8 +75,6 @@ final class Engine {
       setAirHands([], time: 0)
     }
   }
-  /// Shape-local from device coordinates (includes the air-mode scale).
-  var deviceToShape = matrix_identity_float4x4
   /// Scale of the shape in air mode; edge and corner ranges are kept at their
   /// real-world size (2 cm) so tracking noise doesn't hide them.
   var airScale: Float = 0.5
@@ -204,7 +201,7 @@ final class Engine {
   func setAirHands(_ hands: [TrackedHand], time: TimeInterval) {
     // Left/right by position across the shape (its +x is the user's right).
     func meanX(_ h: TrackedHand) -> Float {
-      let xs = h.tips.map { (deviceToShape * SIMD4($0.device, 1)).x }
+      let xs = h.tips.map { (worldToShape * SIMD4($0.world, 1)).x }
       return xs.reduce(0, +) / Float(max(xs.count, 1))
     }
     var assigned: [(hand: Int, data: TrackedHand)] = []
@@ -228,7 +225,7 @@ final class Engine {
       for t in h.tips {
         let key = hand * 8 + t.slot
         seen.insert(key)
-        var p = t.device
+        var p = t.world
         if airSmoothing {
           var f = airFilters[key] ?? {
             var f = ss_one_euro3()
@@ -241,7 +238,7 @@ final class Engine {
           airFilters[key] = f
           p = SIMD3(out[0], out[1], out[2])
         }
-        var tip = AirTip(hand: hand, slot: t.slot, device: p, image: t.image)
+        var tip = AirTip(hand: hand, slot: t.slot, world: p)
         if let probe = old[key] { tip.probe = probe }
         tips.append(tip)
       }
@@ -264,7 +261,7 @@ final class Engine {
     p.corner_range = max(p.corner_range, range)
     probeInput.removeAll(keepingCapacity: true)
     for t in airTips {
-      let q = deviceToShape * SIMD4(t.device, 1)
+      let q = worldToShape * SIMD4(t.world, 1)
       probeInput.append(ss_finger(x: q.x, y: q.y, z: q.z, hand: Int32(t.hand), slot: Int32(t.slot)))
     }
     if probeOutput.count < probeInput.count {
@@ -280,7 +277,7 @@ final class Engine {
   /// A fingertip's position in the shape's frame, in metres of the real world
   /// (for the on-screen readout).
   func airLocal(_ t: AirTip) -> SIMD3<Float> {
-    let q = deviceToShape * SIMD4(t.device, 1)
+    let q = worldToShape * SIMD4(t.world, 1)
     return SIMD3(q.x, q.y, q.z) * airScale
   }
 }

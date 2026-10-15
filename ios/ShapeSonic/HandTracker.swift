@@ -1,23 +1,21 @@
-// "Hands in the air": fingertips from the front TrueDepth camera.
+// "Hands in the air": fingertips from the front TrueDepth camera, in world
+// coordinates.
 //
-// The device stays still (standing, or lying on a table) and looks at the
-// user's hands. Each camera frame:
+// ARKit runs face tracking (front camera: colour + depth) with world tracking
+// (back camera: where the device is). The shape is fixed in the world, as in
+// "touch the glass"; only the fingertips come from the front camera instead of
+// the screen. For each ARKit frame:
 //   1. Vision finds up to two hands and their joints in the colour image;
 //   2. the depth map gives each fingertip's distance (core: ss_fingertip_depth);
-//   3. the camera intrinsics turn pixel + depth into a 3D point
-//      (ss_unproject), which is rotated into the device frame.
+//   3. ARKit's intrinsics and camera pose for that frame turn pixel + depth
+//      into a world point.
 // The result goes to the main queue; Engine assigns hands, smooths and probes.
 //
-// Device frame (CoreMotion's): +x right (portrait), +y top, +z out of the
-// screen, toward the user; the origin is the front camera.
-//
-// The colour and depth buffers are used as the sensor delivers them (no
-// rotation; mirroring switched off), so the intrinsics apply directly. Their
-// axes in the device frame are `bufferRight` and `bufferDown`; the default is
-// for an unmirrored front camera, and the menu can rotate or mirror it if a
-// device differs (see DESIGN.md, "Hands in the air").
+// ARKit's camera frame: +x along the image's rows (u), +y against its columns
+// (-v), and the camera looks along -z. Its intrinsics are for capturedImage at
+// imageResolution; the depth map covers the same field of view.
 
-import AVFoundation
+import ARKit
 import ImageIO
 import Vision
 import simd
@@ -25,25 +23,19 @@ import simd
 struct TrackedHand {
   struct Tip {
     var slot: Int  // 0 thumb, 1 index, 2 middle, 3 ring, 4 little: the pentatonic note
-    var device: SIMD3<Float>  // metres, device frame
-    var image: CGPoint  // normalized sensor-buffer coordinates, top-left origin (for drawing)
+    var world: SIMD3<Float>  // metres, ARKit world frame
   }
   var tips: [Tip]
   var chirality: Int  // 0 left, 1 right, -1 unknown (as Vision reports it)
 }
 
-final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
-  struct Calibration: Equatable {
-    var quarterTurns = 0  // rotate the buffer axes about the optical axis
-    var mirrored = false
-  }
-
+final class HandTracker {
   enum Status: Equatable {
     case off, starting, running(hands: Int), failed(String)
     var text: String {
       switch self {
       case .off: return "Camera off"
-      case .starting: return "Starting the front camera…"
+      case .starting: return "Starting the cameras…"
       case .running(let n):
         return n == 0 ? "Looking for hands…" : n == 1 ? "1 hand" : "\(n) hands"
       case .failed(let message): return message
@@ -51,29 +43,26 @@ final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     }
   }
 
+  /// Front depth camera together with world tracking (A12 and later with Face ID).
   static var isSupported: Bool {
-    AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) != nil
+    ARFaceTrackingConfiguration.isSupported && ARFaceTrackingConfiguration.supportsWorldTracking
   }
 
-  let session = AVCaptureSession()
   /// Called on the main queue with the hands of each frame and its timestamp.
   var onHands: ((_ hands: [TrackedHand], _ time: TimeInterval) -> Void)?
   var onStatus: ((Status) -> Void)?
-  private(set) var device: AVCaptureDevice?
 
   private let queue = DispatchQueue(label: "ShapeSonic.hands", qos: .userInteractive)
-  private let videoOutput = AVCaptureVideoDataOutput()
-  private let depthOutput = AVCaptureDepthDataOutput()
-  private var synchronizer: AVCaptureDataOutputSynchronizer?
-  private var configured = false
-  private var lastDepth: DepthFrame?
   private let request: VNDetectHumanHandPoseRequest = {
     let r = VNDetectHumanHandPoseRequest()
     r.maximumHandCount = 2
     return r
   }()
-  // Accessed on `queue` only.
-  private var calibration = Calibration()
+  // Main queue.
+  private var busy = false
+  private var status = Status.off
+  // `queue` only.
+  private var lastDepth: DepthFrame?
   private var lastHandCount = -1
 
   /// Minimum Vision confidence for a fingertip to be used.
@@ -84,111 +73,19 @@ final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
     (.littleTip, .littleDIP),
   ]
 
-  func setCalibration(_ c: Calibration) {
-    queue.async { self.calibration = c }
+  /// Main queue.
+  func setStatus(_ s: Status) {
+    guard s != status else { return }
+    status = s
+    onStatus?(s)
   }
 
-  func start() {
-    report(.starting)
-    switch AVCaptureDevice.authorizationStatus(for: .video) {
-    case .authorized:
-      queue.async { self.startOnQueue() }
-    case .notDetermined:
-      AVCaptureDevice.requestAccess(for: .video) { granted in
-        if granted {
-          self.queue.async { self.startOnQueue() }
-        } else {
-          self.report(.failed("Camera access is off. Allow it in Settings › ShapeSonic."))
-        }
-      }
-    default:
-      report(.failed("Camera access is off. Allow it in Settings › ShapeSonic."))
-    }
-  }
-
-  func stop() {
+  /// Main queue: forget the last depth map and hand count (session restarted).
+  func reset() {
     queue.async {
-      if self.session.isRunning { self.session.stopRunning() }
       self.lastDepth = nil
       self.lastHandCount = -1
-      self.report(.off)
     }
-  }
-
-  private func report(_ status: Status) {
-    DispatchQueue.main.async { self.onStatus?(status) }
-  }
-
-  // MARK: Session
-
-  private func startOnQueue() {
-    if !configured {
-      if let error = configure() {
-        report(.failed(error))
-        return
-      }
-      configured = true
-    }
-    if !session.isRunning { session.startRunning() }
-    lastHandCount = -1
-  }
-
-  /// Returns an error message, or nil on success.
-  private func configure() -> String? {
-    guard let device = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) else {
-      return "This device has no TrueDepth (Face ID) camera."
-    }
-    self.device = device
-    session.beginConfiguration()
-    defer { session.commitConfiguration() }
-    session.sessionPreset = .vga640x480
-    do {
-      let input = try AVCaptureDeviceInput(device: device)
-      guard session.canAddInput(input) else { return "Can't use the front camera." }
-      session.addInput(input)
-    } catch {
-      return "Can't open the front camera: \(error.localizedDescription)"
-    }
-    videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
-    videoOutput.alwaysDiscardsLateVideoFrames = true
-    guard session.canAddOutput(videoOutput) else { return "Can't read the camera's video." }
-    session.addOutput(videoOutput)
-    depthOutput.isFilteringEnabled = true  // fills holes, smooths over time
-    depthOutput.alwaysDiscardsLateDepthData = true
-    guard session.canAddOutput(depthOutput) else { return "Can't read the camera's depth." }
-    session.addOutput(depthOutput)
-    depthOutput.connection(with: .depthData)?.isEnabled = true
-
-    // Buffers exactly as the sensor sees them: unmirrored, unrotated.
-    for connection in [videoOutput.connection(with: .video), depthOutput.connection(with: .depthData)] {
-      guard let connection else { continue }
-      if connection.isVideoMirroringSupported {
-        connection.automaticallyAdjustsVideoMirroring = false
-        connection.isVideoMirrored = false
-      }
-    }
-
-    // The highest-resolution depth format.
-    let formats = device.activeFormat.supportedDepthDataFormats.filter {
-      let t = CMFormatDescriptionGetMediaSubType($0.formatDescription)
-      return t == kCVPixelFormatType_DepthFloat32 || t == kCVPixelFormatType_DepthFloat16
-    }
-    let best = formats.max {
-      CMVideoFormatDescriptionGetDimensions($0.formatDescription).width
-        < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
-    }
-    do {
-      try device.lockForConfiguration()
-      if let best { device.activeDepthDataFormat = best }
-      device.unlockForConfiguration()
-    } catch {
-      return "Can't configure the depth camera: \(error.localizedDescription)"
-    }
-
-    let sync = AVCaptureDataOutputSynchronizer(dataOutputs: [videoOutput, depthOutput])
-    sync.setDelegate(self, queue: queue)
-    synchronizer = sync
-    return nil
   }
 
   // MARK: Frames
@@ -196,63 +93,66 @@ final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
   private struct DepthFrame {
     let map: CVPixelBuffer  // DepthFloat32
     let width: Int, height: Int
-    let intrinsics: ss_intrinsics
   }
 
-  private func prepare(_ data: AVDepthData) -> DepthFrame? {
+  /// What the tracking queue needs from an ARFrame (frames themselves are not retained).
+  private struct FrameData {
+    let image: CVPixelBuffer
+    let depth: AVDepthData?
+    let cameraToWorld: simd_float4x4
+    let intrinsics: simd_float3x3
+    let resolution: CGSize
+    let time: TimeInterval
+  }
+
+  /// Main queue, for each ARKit frame. Frames arriving while one is being
+  /// processed are skipped (keeping their depth for the next one).
+  func process(_ frame: ARFrame) {
+    let data = FrameData(image: frame.capturedImage, depth: frame.capturedDepthData,
+                         cameraToWorld: frame.camera.transform, intrinsics: frame.camera.intrinsics,
+                         resolution: frame.camera.imageResolution, time: frame.timestamp)
+    if busy {
+      if let d = data.depth { queue.async { self.lastDepth = HandTracker.prepare(d) ?? self.lastDepth } }
+      return
+    }
+    busy = true
+    queue.async {
+      let hands = self.track(data)
+      DispatchQueue.main.async {
+        self.busy = false
+        if let hands { self.onHands?(hands, data.time) }
+      }
+    }
+  }
+
+  private static func prepare(_ data: AVDepthData) -> DepthFrame? {
     let depth = data.depthDataType == kCVPixelFormatType_DepthFloat32
       ? data : data.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
     let map = depth.depthDataMap
-    let w = CVPixelBufferGetWidth(map), h = CVPixelBufferGetHeight(map)
-    var k: ss_intrinsics
-    if let cal = depth.cameraCalibrationData {
-      let m = cal.intrinsicMatrix
-      let ref = cal.intrinsicMatrixReferenceDimensions
-      let sx = Float(w) / Float(ref.width), sy = Float(h) / Float(ref.height)
-      k = ss_intrinsics(fx: m.columns.0.x * sx, fy: m.columns.1.y * sy, cx: m.columns.2.x * sx, cy: m.columns.2.y * sy)
-    } else {
-      // No calibration: a pinhole from the field of view.
-      let fov = (device?.activeFormat.videoFieldOfView ?? 60) * .pi / 180
-      let f = Float(max(w, h)) / 2 / tan(fov / 2)
-      k = ss_intrinsics(fx: f, fy: f, cx: Float(w) / 2, cy: Float(h) / 2)
-    }
-    return DepthFrame(map: map, width: w, height: h, intrinsics: k)
+    return DepthFrame(map: map, width: CVPixelBufferGetWidth(map), height: CVPixelBufferGetHeight(map))
   }
 
-  func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
-                              didOutput collection: AVCaptureSynchronizedDataCollection) {
-    if let d = collection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData, !d.depthDataWasDropped {
-      lastDepth = prepare(d.depthData)
-    }
-    guard let v = collection.synchronizedData(for: videoOutput) as? AVCaptureSynchronizedSampleBufferData,
-          !v.sampleBufferWasDropped, let pixels = CMSampleBufferGetImageBuffer(v.sampleBuffer),
-          let depth = lastDepth else { return }
-    let time = CMSampleBufferGetPresentationTimeStamp(v.sampleBuffer).seconds
+  /// `queue`. Nil until the first depth map arrives.
+  private func track(_ f: FrameData) -> [TrackedHand]? {
+    if let d = f.depth { lastDepth = HandTracker.prepare(d) ?? lastDepth }
+    guard let depth = lastDepth else { return nil }
 
-    // Buffer axes in the device frame.
-    var right = SIMD3<Float>(0, -1, 0), down = SIMD3<Float>(1, 0, 0)
-    for _ in 0..<((calibration.quarterTurns % 4 + 4) % 4) {
-      right = SIMD3(-right.y, right.x, right.z)
-      down = SIMD3(-down.y, down.x, down.z)
-    }
-    if calibration.mirrored { right = -right }
-    let forward = SIMD3<Float>(0, 0, 1)
-
-    // Show Vision the image with the device's top up, so hands are upright.
-    let up = SIMD3<Float>(0, 1, 0)
+    // Show Vision the image with the world's up at the top, so hands are upright.
+    // Image axes in the camera frame: right = +x, down = -y.
+    let up = simd_transpose(f.cameraToWorld) * SIMD4<Float>(0, 1, 0, 0)
     let orientation: CGImagePropertyOrientation
-    if simd_dot(-down, up) > 0.5 { orientation = .up }
-    else if simd_dot(-right, up) > 0.5 { orientation = .right }
-    else if simd_dot(down, up) > 0.5 { orientation = .down }
+    if up.y > 0.5 { orientation = .up }
+    else if -up.x > 0.5 { orientation = .right }
+    else if -up.y > 0.5 { orientation = .down }
     else { orientation = .left }
 
-    let handler = VNImageRequestHandler(cvPixelBuffer: pixels, orientation: orientation, options: [:])
-    do { try handler.perform([request]) } catch { return }
+    let handler = VNImageRequestHandler(cvPixelBuffer: f.image, orientation: orientation, options: [:])
+    do { try handler.perform([request]) } catch { return nil }
     let observations = request.results ?? []
 
-    // Vision's normalized point (oriented image, bottom-left origin) -> buffer
+    // Vision's normalized point (oriented image, bottom-left origin) -> image
     // coordinates (top-left origin, normalized).
-    func toBuffer(_ p: CGPoint) -> CGPoint {
+    func toImage(_ p: CGPoint) -> CGPoint {
       switch orientation {
       case .up: return CGPoint(x: p.x, y: 1 - p.y)
       case .right: return CGPoint(x: 1 - p.y, y: 1 - p.x)
@@ -261,29 +161,32 @@ final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
       }
     }
 
+    let fx = f.intrinsics.columns.0.x, fy = f.intrinsics.columns.1.y
+    let cx = f.intrinsics.columns.2.x, cy = f.intrinsics.columns.2.y
+    let iw = Float(f.resolution.width), ih = Float(f.resolution.height)
+
     var hands: [TrackedHand] = []
     CVPixelBufferLockBaseAddress(depth.map, .readOnly)
     if let base = CVPixelBufferGetBaseAddress(depth.map) {
       let floats = base.assumingMemoryBound(to: Float.self)
       let stride = CVPixelBufferGetBytesPerRow(depth.map) / MemoryLayout<Float>.size
       let radius = max(1.5, Float(depth.width) * 0.006)
-      var k = depth.intrinsics
       for obs in observations {
         guard let points = try? obs.recognizedPoints(.all) else { continue }
         var tips: [TrackedHand.Tip] = []
         for (slot, finger) in HandTracker.fingers.enumerated() {
           guard let tip = points[finger.tip], tip.confidence >= HandTracker.minConfidence else { continue }
-          let t = toBuffer(tip.location)
+          let t = toImage(tip.location)
           var n = t
-          if let next = points[finger.next], next.confidence >= 0.1 { n = toBuffer(next.location) }
-          let tu = Float(t.x) * Float(depth.width), tv = Float(t.y) * Float(depth.height)
-          let nu = Float(n.x) * Float(depth.width), nv = Float(n.y) * Float(depth.height)
-          let z = ss_fingertip_depth(floats, Int32(depth.width), Int32(depth.height), stride, tu, tv, nu, nv, radius)
-          guard z.isFinite else { continue }
-          var c: [Float] = [0, 0, 0]
-          ss_unproject(&k, tu, tv, z, &c)
-          let p = c[0] * right + c[1] * down + c[2] * forward
-          tips.append(TrackedHand.Tip(slot: slot, device: p, image: t))
+          if let next = points[finger.next], next.confidence >= 0.1 { n = toImage(next.location) }
+          let z = ss_fingertip_depth(floats, Int32(depth.width), Int32(depth.height), stride,
+                                     Float(t.x) * Float(depth.width), Float(t.y) * Float(depth.height),
+                                     Float(n.x) * Float(depth.width), Float(n.y) * Float(depth.height), radius)
+          guard z.isFinite, z > 0 else { continue }
+          let u = Float(t.x) * iw, v = Float(t.y) * ih
+          let camera = SIMD4<Float>((u - cx) / fx * z, -(v - cy) / fy * z, -z, 1)
+          let w = f.cameraToWorld * camera
+          tips.append(TrackedHand.Tip(slot: slot, world: SIMD3(w.x, w.y, w.z)))
         }
         guard !tips.isEmpty else { continue }
         let chirality: Int
@@ -299,8 +202,9 @@ final class HandTracker: NSObject, AVCaptureDataOutputSynchronizerDelegate {
 
     if hands.count != lastHandCount {
       lastHandCount = hands.count
-      report(.running(hands: hands.count))
+      let n = hands.count
+      DispatchQueue.main.async { self.setStatus(.running(hands: n)) }
     }
-    DispatchQueue.main.async { self.onHands?(hands, time) }
+    return hands
   }
 }

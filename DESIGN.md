@@ -60,8 +60,8 @@ ios/ShapeSonic/
   Shape.swift              ss_shape wrapper; OBJ via core, PLY/STL/USD(Z)/ABC via ModelIO
   AudioOutput.swift        AVAudioEngine + AVAudioSourceNode calling ss_mixer_render
   Haptics.swift            Core Haptics tap when a fingertip crosses the surface
-  HandTracker.swift        hands in the air: TrueDepth colour + depth, Vision hand pose -> 3D fingertips
-  AirView.swift            hands in the air: camera picture, fingertip dots, status and readout
+  HandTracker.swift        hands in the air: ARKit front colour + depth, Vision hand pose -> world fingertips
+  AirView.swift            hands in the air: overlay with fingertip dots, status and readout
   ShapeSonic-Bridging-Header.h
 models/                    demo shapes (OBJ, already about 0.4 m, all watertight;
                            torus.obj is generated: ring 0.15 m, tube 0.05 m, standing upright
@@ -323,7 +323,8 @@ horizontal plane and rests the shape's base on it.
   line (edges, corners, SDF memory and build time, errors); Show shape and Show
   edges and corners; Hands; the sharp-edge angle; volume and the
   surface-crossing vibration; the latency options and the measured output latency; placement; screen ppi and its override.
-- **Visualization** (hidden by default): a translucent mesh, smooth-shaded
+- **Visualization** (shown by default since the switch to hands in the air;
+  originally hidden by default): a translucent mesh, smooth-shaded
   except across creases sharper than the edge threshold, sharp edges as orange
   1.5 mm tubes, corners as red dots with translucent 2 cm range spheres.
   RealityKit does not sort the triangles within a transparent mesh, so if
@@ -346,63 +347,79 @@ horizontal plane and rests the shape's base on it.
 
 ## Hands in the air (front depth camera)
 
-A second input mode, chosen under **Input** in the menu (remembered). Instead
-of fingers on the glass of a moving phone, the phone **stays still**, standing
-up facing the user or lying flat with the screen up, and the user reaches
-into an invisible shape floating in front of the screen with both hands. The
-core (SDF, features, probe, mixer) is unchanged; only where the fingertips
-come from differs. It needs a TrueDepth (Face ID) camera.
+A second input mode. Instead of fingers on the glass, the front TrueDepth
+camera tracks both hands reaching into the invisible shape in front of the
+screen. As in touch-the-glass, the shape is **fixed in the world**: the phone
+may move, and fingertips are placed in world coordinates. The core (SDF,
+features, probe, mixer) is unchanged; only where the fingertips come from
+differs. It needs a TrueDepth (Face ID) camera that ARKit can run together with
+world tracking (`ARFaceTrackingConfiguration.supportsWorldTracking`).
 
-**Pipeline** (`HandTracker.swift`, on its own queue, per camera frame):
+Touch-the-glass is currently switched off (`AppModel.glassModeAvailable =
+false`): the app always runs this mode, and the menu hides the input picker and
+the glass-only settings. Its code is intact.
 
-1. `AVCaptureSession` on the front TrueDepth camera, VGA colour plus the
-   highest-resolution depth format, synchronized by
-   `AVCaptureDataOutputSynchronizer`; depth filtering on (fills holes). Buffers
-   are used unrotated and unmirrored, so the depth intrinsics
-   (`AVCameraCalibrationData`, scaled from its reference dimensions to the depth
-   map; a pinhole from the field of view as a fallback) apply directly.
-2. Vision `VNDetectHumanHandPoseRequest`, up to 2 hands, on the colour image
-   with the orientation that puts the device's top up, so hands look upright.
-   Its points are mapped back to buffer coordinates.
-3. Each fingertip with confidence ≥ 0.3: depth from `ss_fingertip_depth`
-   (core), which samples a small disc 25% of the way from the tip toward the
-   next joint (on the finger pad, not its silhouette, where depth mixes with
-   the background) and takes the 20th percentile (the finger is the nearest
-   surface there).
-4. `ss_unproject` gives the camera-frame point, which is rotated into the
-   device frame (CoreMotion's: +x right, +y top, +z out of the screen). For an
-   unmirrored front camera the buffer's columns run along device −y and its
-   rows along +x; **Camera calibration** in the menu can rotate or mirror this
-   if a device differs.
+**Session** (`Stage.swift`): `ARFaceTrackingConfiguration` with
+`isWorldTrackingEnabled = true` and gravity alignment. The front camera gives
+the frame's colour image (`capturedImage`) and depth (`capturedDepthData`, at a
+lower rate than video); the back camera tracks the device, so
+`frame.camera.transform` is the front camera's pose in the world. The ARView
+shows the front camera's picture and renders the Visualizer's shape at its
+world transform. `.disableFaceMesh` is set: otherwise RealityKit builds a face
+occlusion mesh for every face anchor and loads its material synchronously on
+the main thread, which hung the app.
+
+**Pipeline** (`HandTracker.swift`, on its own queue; a frame arriving while one
+is in flight is skipped, keeping its depth):
+
+1. Vision `VNDetectHumanHandPoseRequest`, up to 2 hands, on `capturedImage`
+   with the orientation that puts the world's up at the top (from the camera
+   pose), so hands look upright. Its points are mapped back to image
+   coordinates.
+2. Each fingertip with confidence ≥ 0.3: depth from `ss_fingertip_depth`
+   (core) in the latest depth map, which samples a small disc 25% of the way
+   from the tip toward the next joint (on the finger pad, not its silhouette,
+   where depth mixes with the background) and takes the 20th percentile (the
+   finger is the nearest surface there).
+3. ARKit's intrinsics for that frame (`camera.intrinsics` at
+   `imageResolution`) give the camera-frame point (ARKit: +x along the rows,
+   +y up the image, looking along −z), and `camera.transform` takes it to the
+   world. No manual calibration is needed; the old rotation/mirror controls
+   were removed.
 
 **Fingers and hands** (`Engine.setAirHands`, main thread): each finger keeps
 its own note: thumb C, index D, middle E, ring G, little A. With two hands, the
 one further to the user's left (the shape's −x) is the left hand. With one
 hand, Vision's chirality decides, corrected by a running vote of how its
 chirality compared with position whenever both hands were visible. Positions
-are smoothed with a one-euro filter (`ss_one_euro3`, min cutoff 2 Hz, β 8 per
-m/s; menu toggle), keyed by hand and finger.
+are smoothed in the world with a one-euro filter (`ss_one_euro3`, min cutoff
+2 Hz, β 8 per m/s; menu toggle), keyed by hand and finger, and probed through
+`worldToShape`, as touches are.
 
-**Placement** (`ss_air_placement`): the shape's centre is `distance` along the
-device's +z (default 30 cm), level with gravity (CoreMotion), its front facing
-the user: along the device's +z when standing, toward its bottom edge when
-flat. It is scaled to **Shape size** (default 20 cm, since the front camera
-sees about 35 cm across at 30 cm), so all sound ranges scale with it, except
+**Placement** (`Stage.placeAir`): the shape's centre is **Shape centre**
+(default 30 cm) along the front camera's view direction, upright, its front
+(+z) facing the user (horizontally away from the screen; lying flat, a fixed
+horizontal axis of the device). It is scaled to **Shape size** (default 20 cm)
+by a uniform scale in `shapeToWorld`, so all sound ranges scale with it, except
 edge and corner ranges, which stay 2 cm in the real world so tracking noise
-doesn't hide them. It is placed when the mode starts (after the first gravity
-sample) and on **Recenter**.
+doesn't hide them. It is placed on the first normally tracked frame after the
+mode starts, and again on **Recenter** or when distance or size change.
 
-**Screen** (`AirView.swift`): the camera picture, dimmed; a dot per fingertip
-in its hand's colour with its note (filled when inside, only while the shape
-is shown); a status line; and, while the shape is shown, each hand's index
-fingertip in the shape's frame (cm), to check directions. ARKit is paused
-in this mode. Haptics are off (they would shake the phone, not the hand).
+**Screen** (`AirView.swift`, a transparent overlay on the ARView): a dot per
+fingertip at `arView.project` of its world point, in its hand's colour with
+its note (filled when inside, only while the shape is shown); a status line;
+and, while the shape is shown, each hand's index fingertip in the shape's
+frame (cm), to check directions. **Show shape** is on by default. Haptics are
+off in this mode (they would shake the phone, not the hand).
 
-**Untested on a device so far**; expected limits: latency is a camera frame
-plus Vision (≈ 50–100 ms, versus a touch event); fingers hidden behind others
-drop out; TrueDepth works from about 20 cm; Vision needs light. The
-calibration controls exist because the buffer orientation has not been
-verified on hardware.
+**Seen on an iPhone 16 Pro**: tracking is good when the whole hand is visible,
+and is lost when fingers point straight at the camera (foreshortened, the
+joints are hidden from Vision). Other limits: latency is a camera frame plus
+Vision (≈ 50–100 ms, versus a touch event); depth comes at a lower rate than
+video, so the latest map is reused, which misaligns slightly while the phone
+moves; fingers hidden behind others drop out; TrueDepth works from about
+20 cm; Vision needs light. `ss_air_placement` (core) is no longer used by the
+app.
 
 ## Android: is a parallel build worth it?
 

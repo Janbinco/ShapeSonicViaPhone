@@ -38,11 +38,13 @@ struct MenuView: View {
         }
 
         Section {
-          Picker("Input", selection: $model.inputMode) {
-            ForEach(InputMode.allCases) { Text($0.label).tag($0) }
+          if AppModel.glassModeAvailable {
+            Picker("Input", selection: $model.inputMode) {
+              ForEach(InputMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!HandTracker.isSupported && model.inputMode == .glass)
           }
-          .pickerStyle(.segmented)
-          .disabled(!HandTracker.isSupported && model.inputMode == .glass)
           if model.inputMode == .air {
             Text(model.airStatus.text).font(.footnote).foregroundStyle(.secondary)
             VStack(alignment: .leading) {
@@ -59,30 +61,18 @@ struct MenuView: View {
         } header: {
           Text("Input")
         } footer: {
-          if model.inputMode == .air {
-            Text("Stand the phone up facing you, or lay it flat with the screen up, and keep it still. "
+          if !HandTracker.isSupported {
+            Text("Hands in the air needs a TrueDepth (Face ID) camera.")
+          } else if model.inputMode == .air {
+            Text("Stand the phone up facing you, or lay it flat with the screen up. "
                  + "The front camera tracks both hands; each fingertip plays its own note "
-                 + "(thumb C, index D, middle E, ring G, little A). The shape floats in front of the screen.")
+                 + "(thumb C, index D, middle E, ring G, little A). The shape is placed in front of the screen "
+                 + "and stays fixed in the room; recenter to bring it back.")
           } else if HandTracker.isSupported {
             Text("Touch the glass: move the phone through the shape. "
                  + "Hands in the air: keep the phone still and reach into the shape in front of it.")
           } else {
             Text("Hands in the air needs a TrueDepth (Face ID) camera.")
-          }
-        }
-
-        if model.inputMode == .air {
-          Section {
-            Picker("Camera rotation", selection: $model.cameraQuarterTurns) {
-              ForEach(0..<4) { Text("\($0 * 90)°").tag($0) }
-            }
-            .pickerStyle(.segmented)
-            Toggle("Mirror camera", isOn: $model.cameraMirrored)
-          } header: {
-            Text("Camera calibration")
-          } footer: {
-            Text("Only if directions come out wrong: with Show shape on, the readout's x should grow "
-                 + "toward your right, y upward, and z toward you. Rotate or mirror until they do.")
           }
         }
 
@@ -137,16 +127,20 @@ struct MenuView: View {
         }
 
         Section {
-          Toggle("Predict device motion", isOn: $model.predictMotion)
-          Toggle("Use predicted touches", isOn: $model.predictTouches)
+          if model.inputMode == .glass {
+            Toggle("Predict device motion", isOn: $model.predictMotion)
+            Toggle("Use predicted touches", isOn: $model.predictTouches)
+          }
           Text(model.latencyText).font(.footnote).foregroundStyle(.secondary)
         } header: {
           Text("Latency")
         } footer: {
-          Text("Motion prediction brings the camera pose forward to now with the gyroscope. "
+          Text((model.inputMode == .glass
+                ? "Motion prediction brings the camera pose forward to now with the gyroscope. " : "")
                + "Wired headphones or the speaker are much faster than Bluetooth (150–300 ms).")
         }
 
+        if model.inputMode == .glass {
         Section("Placement") {
           Button("Place in front of me", action: model.recenter)
           if model.stage.isAR {
@@ -162,6 +156,9 @@ struct MenuView: View {
           }
         }
 
+        }
+
+        if model.inputMode == .glass {
         Section {
           Text(model.screenText)
           Stepper(value: $model.ppiOverride, in: 0...600, step: 1) {
@@ -172,6 +169,7 @@ struct MenuView: View {
         } footer: {
           Text("Touches are placed on the glass using the screen's pixel density. "
                + "Override it only if this device isn't recognised.")
+        }
         }
       }
       .navigationTitle("ShapeSonic")

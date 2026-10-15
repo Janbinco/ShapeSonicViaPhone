@@ -1,33 +1,29 @@
-// The stage in "hands in the air" mode: the front camera's picture (dimmed),
-// a dot on each tracked fingertip in its hand's colour with its note, a
-// status line, and, while the shape is shown, a readout of where the
-// fingertips are relative to the shape. The picture is for the experimenter;
-// the sonification doesn't depend on it.
+// The overlay in "hands in the air" mode, over the ARView (which shows the
+// front camera's picture and, when shown, the shape fixed in the world): a dot
+// on each tracked fingertip in its hand's colour with its note, a status line,
+// and, while the shape is shown, a readout of where the fingertips are
+// relative to the shape. The picture is for the experimenter; the
+// sonification doesn't depend on it.
 
-import AVFoundation
 import UIKit
+import simd
 
 final class AirView: UIView {
-  let preview = AVCaptureVideoPreviewLayer()
   var showContact = false
-  private let dim = CALayer()
   private let statusLabel = UILabel()
   private let readout = UILabel()
   private var dots: [Int: (ring: CAShapeLayer, label: CATextLayer)] = [:]
-  private var rotation: AVCaptureDevice.RotationCoordinator?
-  private var rotationObservation: NSKeyValueObservation?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
-    backgroundColor = .black
-    preview.videoGravity = .resizeAspectFill
-    layer.addSublayer(preview)
-    dim.backgroundColor = UIColor.black.withAlphaComponent(0.35).cgColor
-    layer.addSublayer(dim)
+    backgroundColor = .clear
+    isUserInteractionEnabled = false
     for label in [statusLabel, readout] {
       label.textColor = .white
       label.numberOfLines = 0
       label.textAlignment = .center
+      label.shadowColor = UIColor.black.withAlphaComponent(0.6)
+      label.shadowOffset = CGSize(width: 0, height: 1)
       label.translatesAutoresizingMaskIntoConstraints = false
       addSubview(label)
     }
@@ -47,37 +43,13 @@ final class AirView: UIView {
 
   required init?(coder: NSCoder) { fatalError() }
 
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    preview.frame = bounds
-    dim.frame = bounds
-    CATransaction.commit()
-  }
-
-  func attach(session: AVCaptureSession, device: AVCaptureDevice?) {
-    if preview.session !== session { preview.session = session }
-    guard let device, rotation == nil else { return }
-    // Keep the picture upright in every interface orientation.
-    let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: preview)
-    rotation = coordinator
-    rotationObservation = coordinator.observe(\.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]) {
-      [weak self] c, _ in
-      DispatchQueue.main.async {
-        guard let connection = self?.preview.connection else { return }
-        let angle = c.videoRotationAngleForHorizonLevelPreview
-        if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
-      }
-    }
-  }
-
   func setStatus(_ text: String) {
     statusLabel.text = text
     accessibilityValue = text
   }
 
-  func redraw(engine: Engine) {
+  /// `project`: world point -> point in this view (the ARView's projection).
+  func redraw(engine: Engine, project: (SIMD3<Float>) -> CGPoint?) {
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     let keys = Set(engine.airTips.map { $0.hand * 8 + $0.slot })
@@ -90,8 +62,14 @@ final class AirView: UIView {
       let key = t.hand * 8 + t.slot
       let entry = dots[key] ?? makeDot()
       dots[key] = entry
-      let p = preview.layerPointConverted(fromCaptureDevicePoint: t.image)
+      guard let p = project(t.world) else {
+        entry.ring.isHidden = true
+        entry.label.isHidden = true
+        continue
+      }
       let color = TouchView.handColors[t.hand]
+      entry.ring.isHidden = false
+      entry.label.isHidden = false
       entry.ring.position = p
       entry.ring.strokeColor = color.cgColor
       entry.ring.fillColor = showContact && t.probe.sdf <= 0 ? color.withAlphaComponent(0.6).cgColor : nil

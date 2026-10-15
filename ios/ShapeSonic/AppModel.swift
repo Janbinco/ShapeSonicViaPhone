@@ -25,7 +25,7 @@ final class AppModel: ObservableObject {
   static let demoSharpAngles: [String: Float] = ["cat": 50]
   static let defaultSharpAngle: Float = 30
 
-  @Published var showShape = false { didSet { applyVisibility() } }
+  @Published var showShape = true { didSet { applyVisibility() } }
   @Published var showFeatures = true { didSet { applyVisibility() } }
   @Published var handMode: HandMode {
     didSet {
@@ -70,6 +70,8 @@ final class AppModel: ObservableObject {
   @Published var virtualAdvance: Float = 0 { didSet { stage.virtualAdvance = virtualAdvance } }
 
   // Hands in the air (front depth camera).
+  /// "Touch the glass" is switched off for now: the app always runs hands in the air.
+  static let glassModeAvailable = false
   @Published var inputMode: InputMode {
     didSet {
       UserDefaults.standard.set(inputMode.rawValue, forKey: "inputMode")
@@ -96,20 +98,7 @@ final class AppModel: ObservableObject {
       UserDefaults.standard.set(airSmoothing, forKey: "airSmoothing")
     }
   }
-  @Published var cameraQuarterTurns: Int {
-    didSet {
-      UserDefaults.standard.set(cameraQuarterTurns, forKey: "cameraQuarterTurns")
-      applyCalibration()
-    }
-  }
-  @Published var cameraMirrored: Bool {
-    didSet {
-      UserDefaults.standard.set(cameraMirrored, forKey: "cameraMirrored")
-      applyCalibration()
-    }
-  }
   @Published private(set) var airStatus = HandTracker.Status.off
-  private var airPlaced = false
   /// The demo shapes are fitted to 40 cm; air mode scales them to airSize.
   static let fittedSize: Float = 0.4
 
@@ -134,12 +123,11 @@ final class AppModel: ObservableObject {
     predictTouches = d.bool(forKey: "predictTouches")
     vibrateOnCrossing = d.object(forKey: "vibrateOnCrossing") as? Bool ?? true
     ppiOverride = d.double(forKey: "ppiOverride")
-    inputMode = InputMode(rawValue: d.string(forKey: "inputMode") ?? "") ?? .glass
+    inputMode = AppModel.glassModeAvailable
+      ? InputMode(rawValue: d.string(forKey: "inputMode") ?? "") ?? .glass : .air
     airDistance = d.object(forKey: "airDistance") as? Float ?? 0.30
     airSize = d.object(forKey: "airSize") as? Float ?? 0.20
     airSmoothing = d.object(forKey: "airSmoothing") as? Bool ?? true
-    cameraQuarterTurns = d.integer(forKey: "cameraQuarterTurns")
-    cameraMirrored = d.bool(forKey: "cameraMirrored")
     let dir = Bundle.main.url(forResource: "models", withExtension: nil)
     let files = (try? FileManager.default.contentsOfDirectory(at: dir ?? URL(fileURLWithPath: "/"),
                                                               includingPropertiesForKeys: nil)) ?? []
@@ -155,9 +143,9 @@ final class AppModel: ObservableObject {
     stage.touchView.showMidline = handMode == .split
     engine.onFingersChanged = { [weak self] in self?.stage.redraw() }
     engine.airSmoothing = airSmoothing
+    stage.tracker = tracker
     tracker.onHands = { [weak self] hands, time in
       guard let self, self.inputMode == .air else { return }
-      if !self.airPlaced { self.placeAir() }
       self.engine.setAirHands(hands, time: time)
     }
     tracker.onStatus = { [weak self] status in
@@ -170,8 +158,7 @@ final class AppModel: ObservableObject {
     }
     pose.onMotionSample = { [weak self] in
       guard let self else { return }
-      if self.inputMode == .air, !self.airPlaced, self.pose.gravity != nil { self.placeAir() }
-      guard self.pose.predict, !self.engine.fingers.isEmpty else { return }
+      guard self.inputMode == .glass, self.pose.predict, !self.engine.fingers.isEmpty else { return }
       self.engine.update()
     }
     stage.onTrackingChanged = { [weak self] text in self?.tracking = text }
@@ -183,7 +170,6 @@ final class AppModel: ObservableObject {
     audio.start()
     audio.setVolume(volume)
     pose.startMotion()
-    applyCalibration()
     applyInputMode()
     stage.start()
     UIApplication.shared.isIdleTimerDisabled = true
@@ -195,12 +181,11 @@ final class AppModel: ObservableObject {
     switch phase {
     case .active:
       guard started else { return }
-      if inputMode == .air { tracker.start() } else { stage.resume() }
+      stage.resume()
       pose.startMotion()
       haptics.start()
     case .background:
       stage.pause()
-      tracker.stop()
       pose.stopMotion()
       haptics.stop()
       engine.clearFingers()
@@ -212,6 +197,7 @@ final class AppModel: ObservableObject {
   // MARK: Shapes
 
   func select(_ demo: Demo) {
+    print("[ShapeSonic] select \(demo.name) (current: \(shapeName ?? "none"), loading: \(loading))")
     sharpAngle = AppModel.demoSharpAngles[demo.name] ?? AppModel.defaultSharpAngle
     load(url: demo.url, name: demo.name, fit: true)
   }
@@ -238,10 +224,21 @@ final class AppModel: ObservableObject {
     loading = true
     setStatus("Building \(name)…")
     let angle = sharpAngle
+    let started = CACurrentMediaTime()
+    print("[ShapeSonic] load #\(generation) \(name) started")
     DispatchQueue.global(qos: .userInitiated).async {
       let result = Result { try ShapeLoader.build(url: url, name: name, fit: fit, sharpAngle: angle) }
+      let built = CACurrentMediaTime()
       DispatchQueue.main.async {
-        guard generation == self.loadGeneration else { return }  // a newer load won
+        let ms = { (t: CFTimeInterval) in Int((t - started) * 1000) }
+        switch result {
+        case .success: print("[ShapeSonic] load #\(generation) \(name) built in \(ms(built)) ms, on main at \(ms(CACurrentMediaTime())) ms")
+        case .failure(let e): print("[ShapeSonic] load #\(generation) \(name) FAILED after \(ms(built)) ms: \(e.localizedDescription)")
+        }
+        guard generation == self.loadGeneration else {  // a newer load won
+          print("[ShapeSonic] load #\(generation) \(name) discarded (newest is #\(self.loadGeneration))")
+          return
+        }
         self.loading = false
         switch result {
         case .success(let shape): self.install(shape)
@@ -252,11 +249,13 @@ final class AppModel: ObservableObject {
   }
 
   private func install(_ shape: Shape) {
+    let t0 = CACurrentMediaTime()
     engine.shape = shape
     shapeName = shape.name
     stage.visualizer.setShape(shape, sharpAngle: sharpAngle)
     applyVisibility()
     updateStatus()
+    print("[ShapeSonic] installed \(shape.name) in \(Int((CACurrentMediaTime() - t0) * 1000)) ms")
   }
 
   func sharpAngleCommitted() {
@@ -269,9 +268,7 @@ final class AppModel: ObservableObject {
 
   // MARK: Placement
 
-  func recenter() {
-    if inputMode == .air { placeAir() } else { stage.recenter() }
-  }
+  func recenter() { stage.recenter() }
 
   // MARK: Hands in the air
 
@@ -280,40 +277,27 @@ final class AppModel: ObservableObject {
     engine.inputMode = inputMode
     stage.setAirMode(air)
     if air {
-      stage.airView.attach(session: tracker.session, device: nil)
-      airPlaced = false
-      placeAir()
-      tracker.start()
+      placeAir()  // waits for the first tracked frame if there is none yet
     } else {
-      tracker.stop()
+      tracker.setStatus(.off)
       tracking = nil
     }
     updateAirStatus()
   }
 
-  private func applyCalibration() {
-    tracker.setCalibration(HandTracker.Calibration(quarterTurns: cameraQuarterTurns, mirrored: cameraMirrored))
-  }
-
-  /// Float the shape in front of the still device, level with gravity.
+  /// Air-mode distance and size; the shape is placed in the world (Stage) and
+  /// stays there until recentred.
   func placeAir() {
     guard inputMode == .air else { return }
-    let g = pose.gravity ?? SIMD3<Float>(0, -1, 0)
     let scale = airSize / AppModel.fittedSize
-    var m = [Float](repeating: 0, count: 16)
-    let gravity: [Float] = [g.x, g.y, g.z]
-    ss_air_placement(gravity, airDistance, scale, &m)
-    let shapeToDevice = simd_float4x4(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
-                                      SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
     engine.airScale = scale
-    engine.deviceToShape = shapeToDevice.inverse
-    airPlaced = pose.gravity != nil
-    engine.update()
+    stage.airDistance = airDistance
+    stage.airScale = scale
+    stage.recenter()
   }
 
   private func updateAirStatus() {
     guard inputMode == .air else { return }
-    if let device = tracker.device { stage.airView.attach(session: tracker.session, device: device) }
     var text = airStatus.text
     if case .running(let n) = airStatus, n == 0 {
       text += String(format: "\nHold your hands about %.0f cm from the screen.", airDistance * 100)

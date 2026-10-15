@@ -4,8 +4,9 @@
 // Without ARKit (the Simulator), the view renders without a camera and the
 // device pose is a virtual one that the menu can move toward the shape.
 //
-// In "hands in the air" mode, ARKit is paused (the front camera is in use) and
-// an AirView with the front camera's picture covers the stage.
+// In "hands in the air" mode, ARKit runs face tracking with world tracking:
+// the ARView shows the front camera's picture, the shape stays fixed in the
+// world as in "touch the glass", and an AirView over it marks the fingertips.
 
 import ARKit
 import RealityKit
@@ -17,15 +18,21 @@ final class Stage: NSObject, ARSessionDelegate {
   let touchView = TouchView()
   let airView = AirView()
   let visualizer = Visualizer()
-  /// Hands-in-the-air mode: ARKit stays paused.
+  /// Hands-in-the-air mode: front camera, fingertips from HandTracker.
   private(set) var airMode = false
   let isAR = ARWorldTrackingConfiguration.isSupported
   let engine: Engine
+  var tracker: HandTracker?
   var onTrackingChanged: ((String?) -> Void)?
 
   /// Distance from the device to the shape's centre when placed in front of it.
   static let placementDistance: Float = 0.45
+  /// Air mode: distance from the screen to the shape's centre (m), and the
+  /// shape's scale (its local frame is the 40 cm fitted size).
+  var airDistance: Float = 0.30
+  var airScale: Float = 0.5
   private var placed = false
+  private var started = false
   private var virtualCamera: PerspectiveCamera?
   /// Simulator only: how far the virtual device has moved toward the shape (m).
   var virtualAdvance: Float = 0 {
@@ -37,8 +44,13 @@ final class Stage: NSObject, ARSessionDelegate {
     arView = ARView(frame: .zero, cameraMode: ARWorldTrackingConfiguration.isSupported ? .ar : .nonAR,
                     automaticallyConfigureSession: false)
     super.init()
-    arView.renderOptions.formUnion([.disableMotionBlur, .disableDepthOfField])
+    // Air mode runs face tracking only for the front camera's picture and depth.
+    // Without .disableFaceMesh, RealityKit builds an occlusion mesh for each face
+    // anchor and loads its material synchronously on the main thread, which can
+    // hang the app (watchdog 0x8BADF00D).
+    arView.renderOptions.formUnion([.disableMotionBlur, .disableDepthOfField, .disableFaceMesh])
     arView.scene.addAnchor(visualizer.anchor)
+    arView.session.delegate = self
     airView.isHidden = true
     for v in [arView, touchView, airView] {
       v.frame = container.bounds
@@ -58,19 +70,40 @@ final class Stage: NSObject, ARSessionDelegate {
 
   func start() {
     engine.screen = touchView.window?.screen
-    if isAR && airMode {
-      onTrackingChanged?(nil)
-    } else if isAR {
-      let config = ARWorldTrackingConfiguration()
-      config.worldAlignment = .gravity
-      config.planeDetection = [.horizontal]
-      arView.session.delegate = self
-      arView.session.run(config)
+    started = true
+    if isAR {
+      runSession(reset: false)
     } else {
       updateVirtualPose()
       recenter()
       onTrackingChanged?("No ARKit: virtual device")
+      if airMode { tracker?.setStatus(.failed("Hands in the air needs a TrueDepth (Face ID) camera.")) }
     }
+  }
+
+  /// Run the session for the current mode.
+  private func runSession(reset: Bool) {
+    guard isAR else { return }
+    let config: ARConfiguration
+    if airMode {
+      guard HandTracker.isSupported else {
+        arView.session.pause()
+        tracker?.setStatus(.failed("Hands in the air needs a TrueDepth (Face ID) camera."))
+        return
+      }
+      let face = ARFaceTrackingConfiguration()
+      face.isWorldTrackingEnabled = true
+      face.worldAlignment = .gravity
+      config = face
+      tracker?.reset()
+      tracker?.setStatus(.starting)
+    } else {
+      let world = ARWorldTrackingConfiguration()
+      world.worldAlignment = .gravity
+      world.planeDetection = [.horizontal]
+      config = world
+    }
+    arView.session.run(config, options: reset ? [.resetTracking, .removeExistingAnchors] : [])
   }
 
   func pause() {
@@ -78,40 +111,42 @@ final class Stage: NSObject, ARSessionDelegate {
   }
 
   func resume() {
-    guard isAR, !airMode else { return }
+    guard isAR, started else { return }
     if let config = arView.session.configuration {
+      if airMode { tracker?.reset() }
       arView.session.run(config)
     } else {
-      let config = ARWorldTrackingConfiguration()
-      config.worldAlignment = .gravity
-      config.planeDetection = [.horizontal]
-      arView.session.delegate = self
-      arView.session.run(config)
+      runSession(reset: false)
     }
   }
 
-  /// Switch between the glass (ARKit) and hands-in-the-air stages.
+  /// Switch between the glass and hands-in-the-air stages.
   func setAirMode(_ on: Bool) {
     guard on != airMode else { return }
     airMode = on
     airView.isHidden = !on
     touchView.isHidden = on
-    arView.isHidden = on
-    if on {
-      pause()
-    } else {
-      resume()
-    }
+    placed = false
+    if started { runSession(reset: true) }
   }
 
   func redraw() {
-    if airMode { airView.redraw(engine: engine) } else { touchView.redraw() }
+    if airMode {
+      airView.redraw(engine: engine) { [arView] p in arView.project(p) }
+    } else {
+      touchView.redraw()
+    }
   }
 
   // MARK: Placement
 
   /// Put the shape's centre in front of the device, upright, facing it.
+  /// Air mode: in front of the screen, facing the user.
   func recenter() {
+    if airMode {
+      placeAir()
+      return
+    }
     let cam = engine.pose.frameTransform
     let position = SIMD3(cam.columns.3.x, cam.columns.3.y, cam.columns.3.z)
     let forward = -SIMD3(cam.columns.2.x, 0, cam.columns.2.z)
@@ -119,10 +154,29 @@ final class Stage: NSObject, ARSessionDelegate {
     place(at: position + flat * Stage.placementDistance, facing: flat)
   }
 
+  /// Air mode: the shape's centre airDistance along the front camera's view,
+  /// upright, its front (+z) toward the user. It then stays put in the world.
+  private func placeAir() {
+    guard isAR, let frame = arView.session.currentFrame, case .normal = frame.camera.trackingState else { return }
+    let cam = frame.camera.transform  // the front camera, looking along -z: toward the user
+    let position = SIMD3(cam.columns.3.x, cam.columns.3.y, cam.columns.3.z)
+    let view = simd_normalize(-SIMD3(cam.columns.2.x, cam.columns.2.y, cam.columns.2.z))
+    func horizontal(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.x, 0, v.z) }
+    var toUser = horizontal(view)
+    if simd_length(toUser) < 0.3 {
+      // Lying flat, looking up: any fixed horizontal direction of the device.
+      let a = horizontal(SIMD3(cam.columns.0.x, cam.columns.0.y, cam.columns.0.z))
+      let b = horizontal(SIMD3(cam.columns.1.x, cam.columns.1.y, cam.columns.1.z))
+      toUser = simd_length(a) > simd_length(b) ? a : b
+    }
+    toUser = simd_length(toUser) > 1e-3 ? simd_normalize(toUser) : SIMD3<Float>(0, 0, 1)
+    place(at: position + view * airDistance, facing: -toUser, scale: airScale)
+  }
+
   /// Rest the shape's base on the horizontal surface at the centre of the screen.
   @discardableResult
   func placeOnSurface() -> Bool {
-    guard isAR, let shape = engine.shape else { return false }
+    guard isAR, !airMode, let shape = engine.shape else { return false }
     let centre = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
     guard let hit = arView.raycast(from: centre, allowing: .estimatedPlane, alignment: .horizontal).first else {
       return false
@@ -136,10 +190,11 @@ final class Stage: NSObject, ARSessionDelegate {
     return true
   }
 
-  private func place(at p: SIMD3<Float>, facing forward: SIMD3<Float>) {
-    // The shape's +z (its front) points back toward the user.
+  private func place(at p: SIMD3<Float>, facing forward: SIMD3<Float>, scale: Float = 1) {
+    // The shape's +z (its front) points back along -forward.
     let yaw = atan2(-forward.x, -forward.z)
     var m = simd_float4x4(simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0)))
+      * simd_float4x4(diagonal: SIMD4(scale, scale, scale, 1))
     m.columns.3 = SIMD4(p, 1)
     engine.shapeToWorld = m
     visualizer.setTransform(m)
@@ -159,9 +214,20 @@ final class Stage: NSObject, ARSessionDelegate {
   // MARK: ARSessionDelegate (main queue)
 
   func session(_ session: ARSession, didUpdate frame: ARFrame) {
+    if airMode {
+      if !placed, case .normal = frame.camera.trackingState { placeAir() }
+      tracker?.process(frame)
+      return
+    }
     engine.pose.ingest(frame)
     if !placed, case .normal = frame.camera.trackingState { recenter() }
     engine.update()
+  }
+
+  func session(_ session: ARSession, didFailWithError error: Error) {
+    let message = (error as? ARError)?.code == .cameraUnauthorized
+      ? "Camera access is off. Allow it in Settings › ShapeSonic." : error.localizedDescription
+    if airMode { tracker?.setStatus(.failed(message)) } else { onTrackingChanged?(message) }
   }
 
   func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
